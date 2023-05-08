@@ -4,7 +4,7 @@ Version: 0.0.0.9
 Authors@R: 
     c(person("Peter", "Ewald", , "peter.ewald@example.com", role = c("aut", "cre"),
            comment = c(ORCID = "YOUR-ORCID-ID")),
-      person("Simeon", "Lisovski", , "simeon.lisovski@gmail.com", role = c("aut", "cre"),
+      person("Simeon", "Lisovski", , "simeon.lisovski@gmail.com", role = c("aut"),
            comment = c(ORCID = "0000-0002-6399-0035")))
 Description:The package does awesome things.
 License:
