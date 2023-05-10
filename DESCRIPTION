@@ -6,9 +6,9 @@ Authors@R:
            comment = c(ORCID = "YOUR-ORCID-ID")),
       person("Simeon", "Lisovski", , "simeon.lisovski@gmail.com", role = c("aut"),
            comment = c(ORCID = "0000-0002-6399-0035")))
-Description:The package does awesome things.
+Description: The package does awesome things.
 License:
     use_gpl3_license()
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.2.1
+RoxygenNote: 7.2.3
