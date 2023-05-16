@@ -22,7 +22,7 @@ NULL
 ##' \item{\code{...}}{...: ...}
 ##' @importFrom data.table fread
 ##' @importFrom dplyr select
-##' @importFrom dplyr dplyr::full_join
+##' @importFrom dplyr full_join
 ##' @importFrom dplyr pull
 ##' @importFrom dplyr group_by
 ##' @importFrom sf st_as_sf
@@ -36,11 +36,9 @@ NULL
 ##' @export
 psaMap <- function(veg_folder, regMap, calibMap, save_folder = NULL, plt = T) {
   
-  # requireNamespace(data.table)
-  # requireNamespace(sf); sf_use_s2(F)
-  # requireNamespace(dplyr); select = dplyr::select()
-  # requireNamespace(rnaturalearth)
+  # packages needed: data.table, sf, dplyr,rnaturalearth
   
+  sf_use_s2(F)
   return_list = list()
   
   # load vegetation and meta data
@@ -94,6 +92,8 @@ psaMap <- function(veg_folder, regMap, calibMap, save_folder = NULL, plt = T) {
   
   # create map with pollen source areas based on provided maps
   {
+    cat("\nCreate map with pollen source areas")
+    
     # project sites to target geometry from maps
     if (!(st_crs(regMap) == st_crs(calibMap))){
       stop("The same projection for the region and calibration map must be provided.")
@@ -137,17 +137,34 @@ psaMap <- function(veg_folder, regMap, calibMap, save_folder = NULL, plt = T) {
     return_list$meta_data[["centres"]] = centres
   }
   
-  # filter vegetation data based on selected pollen source areas
+  # filter vegetation data based on selected pollen source areas, drop taxa not present, and normalize rows to 1
   {
+    cat("\nFilter vegetation data within maps")
+    
+    # filter sites if in any map
     veg_cover = veg_cover %>% 
       left_join(intersects, by = "Dataset_ID")
     meta_cols_veg = c("Dataset_ID", "Age", c("Intersects_regMap", "Intersects_calibMap"))
+    veg_cover = veg_cover %>% filter(Intersects_regMap | Intersects_calibMap) 
     
-    veg_cover = veg_cover %>% filter(Intersects_regMap | Intersects_calibMap) %>% 
+    # remove samples with no age and replace any NA percentage with 0
+    veg_cover = veg_cover %>% filter(!is.na(Age)) %>% 
       mutate(across(where(is.numeric), ~replace_na(.x, 0)))
+    
+    # reorder columns
     veg_cover = veg_cover[,c(meta_cols_veg, 
                              colnames(veg_cover)[!(colnames(veg_cover) %in% meta_cols_veg)])]
     
+    # drop taxa not present at any site
+    taxa_cols_veg = colnames(veg_cover)[!(colnames(veg_cover) %in% meta_cols_veg)]
+    taxa_cols_veg = names(which(!apply(veg_cover[,taxa_cols_veg], 2, function(u) all(u == 0))))
+    veg_cover = veg_cover[, c(meta_cols_veg, taxa_cols_veg)]
+    
+    # normalize all taxa to 1
+    veg_cover = data.frame(veg_cover[,meta_cols_veg],
+                            t(apply(veg_cover[,taxa_cols_veg], 1, function(u){ u/sum(u) }))) 
+    
+    # return vegetation cover
     return_list$veg_cover = veg_cover
   }
   
@@ -181,6 +198,7 @@ psaMap <- function(veg_folder, regMap, calibMap, save_folder = NULL, plt = T) {
     
     # plot oldest samples and number of samples per site
     {
+      cat("\nPlot number of and age of oldest pollen samples per site")
       # prepare plot data frame
       plt_df = centres %>% 
         left_join(veg_cover %>% group_by(Dataset_ID) %>% summarize(Oldest_Sample = max(Age)), by = "Dataset_ID") %>%
@@ -277,7 +295,147 @@ psaMap <- function(veg_folder, regMap, calibMap, save_folder = NULL, plt = T) {
   if (is.null(save_folder)){ 
     return(return_list) 
   } else{
-    save(return_list, file = file.path(save_folder, "psaMap.rda"))
+    fl_name =  file.path(save_folder, "psaMap.rda")
+    cat("\nSave to file", fl_name)
+    save(return_list, file = fl_name)
+  }
+}
+
+## interpolate vegetation cover
+##'
+##' ...
+##' @title modernShares
+##' @param veg_cover
+##' save_folder
+##' @return ...
+##' \item{\code{...}}{...: ...}
+##' @importFrom dplyr filter
+##' @export
+modernVegShares = function(veg_cover, 
+                           time_span_modern,
+                           meta_cols_veg =  c("Dataset_ID", "Age", 
+                                              "Intersects_regMap", "Intersects_calibMap"),
+                           save_folder = NULL){
+  
+  taxa_cols_veg = colnames(veg_cover %>% select(-all_of(meta_cols_veg)))
+  veg_modern = veg_cover %>% filter(Intersects_calibMap) %>% filter(Age <= time_span_modern)
+  veg_modern = as.data.frame(veg_modern[,c("Dataset_ID", taxa_cols_veg)] %>%
+                               group_by(Dataset_ID) %>%
+                               summarise(across(everything(), mean, na.rm=T)))
+  row.names(veg_modern) = NULL
+  
+  if (!is.null(save_folder)){
+    save(veg_modern, file = file.path(save_folder, "modernVegShares.rda"))
+  } else{
+    return(veg_modern)
+  }
+}
+
+## interpolate vegetation cover of one site
+##'
+##' ...
+##' @title modernShares
+##' @param veg_cover
+##' save_folder
+##' @return ...
+##' \item{\code{...}}{...: ...}
+##' @importFrom dplyr filter
+##' @export
+interpolate_ages_per_site = function(df, 
+                                     #ID, 
+                                     meta_cols,
+                                     fc = 1/500, dt = 500,
+                                     k = 5, int.method = "linear",
+                                     appliedFilter = "gauss"){
+  library(corit)
+  
+  taxa_cols = colnames(df)[!(colnames(df) %in% meta_cols)] 
+  df_taxa = df[, taxa_cols]
+  
+  # sort out all NA columns if existing
+  df_taxa = df_taxa %>% select(which(colSums(is.na(.)) == 0))
+  taxa_cols = colnames(df_taxa)[!(colnames(df_taxa) %in% meta_cols)] 
+  
+  # in case all sample are within one time intervall average the vegetation cover to age dt
+  # to keep 1 time slice at least. from interpolation there would results 0 time slices.
+  if (df$Age[nrow(df)] <= dt){
+    df = data.frame(Dataset_ID = unique(df$Dataset_ID), 
+                    Age = dt, 
+                    t(apply(df %>% select(-Dataset_ID, -Age), 2, mean)),
+                    stringsAsFactors = F)
+  } else{
+    
+    # interpolate to 500 years grid
+    df_taxa_interp = do.call(cbind, 
+                             lapply(
+                               taxa_cols,
+                               function(u){
+                                 col = zoo(df_taxa[,u], order.by = df$Age)
+                                 col_interp = InterpolationMethod(X = col, fc=fc, dt=dt,
+                                                                  timser.length = tail(df$Age, n=1), 
+                                                                  int.method = int.method, 
+                                                                  appliedFilter = appliedFilter, 
+                                                                  k=k)
+                                 ages = index(col_interp)
+                                 df_ret = data.frame(Age = ages, col_interp)
+                                 colnames(df_ret) = c("Age", u); row.names(df_ret) = NULL
+                                 
+                                 return(df_ret)
+                                 
+                               }))
+    df_taxa_interp$Dataset_ID = unique(df$Dataset_ID)
+    df = df_taxa_interp[, c("Dataset_ID", "Age", taxa_cols)]
+  }
+  
+  
+  return(df)
+}
+
+## interpolate vegetation cover
+##'
+##' can have one or multiple IDs in columns Dataset_ID. If multiple, Interpolation is done seperately and the result is joined.
+##' @title modernShares
+##' @param veg_cover
+##' save_folder
+##' @return ...
+##' \item{\code{...}}{...: ...}
+##' @importFrom dplyr filter
+##' @export
+ 
+
+interpVegTS = function(veg_cover, save_folder = NULL){
+  
+  # packages needed: parallel, zoo, dplyr
+  
+  cat("\n\nInterpolate past vegetation time series")
+  IDs = unique(veg_cover$Dataset_ID)
+  
+  veg_cover_interp = parallel::mclapply(IDs,
+                                        function(x){
+                                          veg_site = veg_cover %>% filter(Dataset_ID == x) %>% arrange(Age)
+                                          veg_site_interp = suppressWarnings(
+                                            interpolate_ages_per_site(df = veg_site %>%
+                                                                        select(-Intersects_regMap, 
+                                                                               -Intersects_calibMap),
+                                                                      meta_cols = c("Dataset_ID",
+                                                                                    "Age"),
+                                                                      fc = fc, dt = dt, k = k)
+                                          )
+                                          
+                                          veg_site_interp = suppressMessages(
+                                            veg_site_interp %>% 
+                                              left_join(unique(veg_site %>% 
+                                                                 select(all_of(c("Dataset_ID", "Intersects_regMap", "Intersects_calibMap")))))
+                                          )
+                                          
+                                          return(veg_site_interp)
+                                        }, mc.cores = parallel_max)
+  veg_cover_interp = suppressMessages(Reduce(full_join, veg_cover_interp))
+  
+  if (!is.null(save_folder)){
+    save(veg_cover_interp, file = file.path(main_dir, "interim_results", "interpVegTS", "interpVegTS.rda"))
+  } else{
+    return(veg_cover_interp)
   }
 }
 
@@ -326,3 +484,5 @@ load_rda = function(file_name){
   load(file_name)
   get(ls()[ls() != "file_name"]) 
 }
+
+
