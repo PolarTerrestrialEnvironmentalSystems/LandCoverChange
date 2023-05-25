@@ -1,0 +1,335 @@
+---
+title: "LandCoverChange: Pipeline"
+output: html_document
+date: "2023-05-08"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r init, include = FALSE}
+knitr::opts_chunk$set(echo = T) 
+```
+
+```{r setup, include = FALSE}
+library(LandCoverChange)
+library(tidyverse)
+library(sf); sf_use_s2(FALSE)
+
+data_dir   <- "~/Documents/LandCoverChangeProject_data/"
+output_dir <- "~/Documents/LandCoverChangeOutput_vignette"
+
+create_subfolders(output_dir, default = TRUE)
+```
+
+
+Define regions ("regionMap" for land cover reconstruction and calibMap for the calibration of vegetation cover to land cover), create Pollen Source Areas (PSAs) from their site centres and pollen source radius, and extract vegetation cover time series in all PSAs.
+
+```{r psaMap, include=TRUE, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(sf); sf_use_s2(FALSE)
+
+# define map and projection
+centre = c(175, 65) # center of study region, (lon, lat) in °
+extent = 2000       # 1/2 diameter of the rectangle to cut around centre in equal area projection
+proj   = sprintf("+proj=laea +lon_0=%f +lat_0=%f +ellps=sphere", centre[1], centre[2])
+bbox   = st_sfc(st_point(c(0,0)), crs = proj) %>% st_buffer(extent*1000) %>% st_bbox() %>%
+            st_as_sfc()
+
+world  = rnaturalearth::ne_countries(scale = "medium", returnclass = "sf") %>%
+  st_shift_longitude() %>% st_transform(proj) %>% st_make_valid()
+
+# region subset
+regMap = suppressWarnings(
+  world %>% st_intersection(bbox) %>% st_buffer(50) %>% st_union()
+)
+
+# calibration subset
+calibMap = suppressWarnings(
+  world %>% st_intersection(bbox %>% st_buffer(extent * 1000)) %>%
+  dplyr::select("continent") %>% rename(groups = continent) %>%
+  group_by(groups) %>% summarize(geometry = st_union(st_buffer(geometry, 20)))
+)
+
+# load data, filter pollen source areas in region and/or calibration subset
+psaVeg <- make_psaVeg(veg_folder = file.path(data_dir, "data", "vegetation_cover"),
+                      regMap = regMap, calibMap = calibMap)
+
+
+# plot psaVeg Map
+plot(psaVeg)
+```
+
+
+
+```{r interpolate_veg_cover, fig.height=8, fig.width=12}
+# interpolate vegetaton cover time series to intervals of length dt
+
+parallel_max = 4 # number of cores for parallel::mclapply
+if (Sys.info()[["sysname"]] == "Windows"){ parallel_max = 1 }
+
+# interpolation parameters for time series
+fc = 1/500; dt = 500; k = 5
+    
+# interp brings some 10% of rows with NA, CHECK WHY!
+interpVegTS(veg_cover, save_folder = file.path(main_dir, "interim_results", "interpVegTS"))
+veg_cover_interp = load_rda(file.path(main_dir, "interim_results", "interpVegTS", "interpVegTS.rda"))
+
+
+# plot one site: compare original and interpolated ages, plot only n_taxa taxa with largest mean abundance
+plotVegSite(vegCover1 = veg_cover, name1 = "Original Vegetation Cover", 
+            vegCover2 = veg_cover_interp,  name2 = "Interpolated Vegetation Cover", 
+            ID = 100055, n_taxa = 12)
+
+```
+
+
+# calibration of the vegetation cover - land cover relationship to the modern data
+
+## modern vegetation cover shares within each pollen source area
+```{r veg_modern_shares}
+
+# period from present to time_span_calib_modern years to be calibrated to modern satellite land cover data
+time_span_modern = 1000
+
+# extract modern vegetation cover shares within each PSA (normalized to 1)
+modernVegShares(veg_cover, time_span_modern = time_span_modern, 
+                save_folder = file.path(main_dir, "interim_results", "modernVegShares")) 
+veg_modern = load_rda(file.path(main_dir, "interim_results", "modernVegShares",
+                                "modernVegShares.rda"))
+```
+
+ 
+## modern land cover shares within each pollen source area
+```{r lc_modern_shares, fig.height=6, fig.width=8}
+
+# land cover class settings
+{
+    # load class definitions
+    class_defs = readxl::read_excel(file.path("C:", "Users", "pewald", "Documents", "Projects", 
+                                                   "Landcover_Change", "LandCoverChangeProject", "settings",
+                                                   "landcover_class_definitions.xlsx")) 
+                
+    # define which classes shall be merged 
+    # get an overview under /vignette/merging_of_landcover_classes.xlsx, definition however, is done here:
+    classes_to_merge = list(list("old_classes" = c(10, 11, 12, 20),
+                                 "new_class" = c(15),
+                                 "new_label" = paste0("Cropland")), # new_label is not used, serves just to keep the overview in this list
+                            list("old_classes" = c(60, 61, 62),
+                                 "new_class" = c(65),
+                                 "new_label" = paste0("Broadleaved, deciduous")),
+                            list("old_classes" = c(70, 71, 72),
+                                 "new_class" = c(75),
+                                 "new_label" = paste0("Needleleaved, evergreen")),
+                            list("old_classes" = c(80, 81, 82),
+                                 "new_class" = c(85),
+                                 "new_label" = paste0("Needleleaved, deciduous")),
+                            list("old_classes" = c(100, 110),
+                                 "new_class" = c(105),
+                                 "new_label" = paste0("Mixed Trees, Shrubs and Herbs")),
+                            list("old_classes" = c(120, 121, 122),
+                                 "new_class" = c(125),
+                                 "new_label" = paste0("Shrubland")),
+                            list("old_classes" = c(150, 151, 152, 153),
+                                 "new_class" = c(155),
+                                 "new_label" = paste0("Sparse Vegetation")),
+                            list("old_classes" = c(160, 170),
+                                 "new_class" = c(165),
+                                 "new_label" = paste0("Trees, flooded")),
+                            list("old_classes" = c(200, 201, 202),
+                                 "new_class" = c(205),
+                                 "new_label" = paste0("Bare Areas")))
+}
+
+# extract land cover shares in PSAs with google earth engine and merge classes
+{
+    # create and/or set python environment and setup google earth engine
+    {
+        # for installation and configuration of google cloud engine with R, see:
+        #   https://www.css.cornell.edu/faculty/dgr2/_static/files/R_html/ex_rgee.html
+        #   https://github.com/r-spatial/rgee
+        
+        # restart R session if any problems
+        #ee_clean_pyenv()
+        #ee_install()
+        
+        library(rgee)
+        Sys.setenv("EARTHENGINE_GCLOUD" = file.path("C:", "Users", "pewald", "AppData", "Local", "Google", "Cloud SDK", "google-cloud-sdk", "bin"))
+        
+        #ee_clean_user_credentials()
+        #ee_Authenticate()
+        ee_Initialize()
+    }
+
+    modernLCShares(polygons = psas %>% 
+                   filter(psas$Intersects_calibMap) %>% # only sites within calibration subset
+                   filter(psas$Dataset_ID %in% veg_modern$Dataset_ID), # and only site which have any samples in the modern vegetation time series
+                   resolution = 300,
+                   class_defs = class_defs, merge_classes = classes_to_merge,
+                   save_folder = file.path(main_dir, "interim_results", "modernLCShares"))
+    lc_modern = load_rda(file.path(main_dir, "interim_results", "modernLCShares",
+                                   "modernLCShares.rda"))
+}
+
+# class definitions after merging and definition of abbreviations
+{
+    class_defs = class_defs %>% filter(is.na(Merge_To_Class)) 
+    
+    all_lc_codes = class_defs$Class_Code # all land cover classes
+    all_lc_names = paste0("LC", all_lc_codes)
+    
+    # only those explained by vegetation (taxa in veg_modern), i.e. included in calibration
+    include_calib_codes = class_defs$Class_Code[which(class_defs$Include_Class_In_Calibration)] 
+    include_calib_names = paste0("LC", include_calib_codes)
+    
+    # only those not explained by vegetation, i.e. excluded from calibration
+    exclude_calib_codes = class_defs$Class_Code[which(!class_defs$Include_Class_In_Calibration)] 
+    exclude_calib_names = paste0("LC", exclude_calib_codes)
+    
+    # those classes of the excluded ones, that will always be predicted to the modern value in the past
+    keep_const_codes = class_defs$Class_Code[which(class_defs$Keep_Constant_in_Past)] 
+    keep_const_names = paste0("LC", keep_const_codes)
+    
+    # those classes of the excluded ones, that will be set to zero in the past
+    set_zero_codes = class_defs$Class_Code[which(class_defs$Set_Zero_In_Past)] 
+    set_zero_names = paste0("LC", set_zero_codes) 
+}
+
+# sort out classes that should be generally excluded from steps of the model
+{
+    # strong class imbalances do not matter here, but later for RDA models and the land cover downscaling, thus, 
+    # set classes with just a few cells within the calibration region to NA
+    thresh_del_lc = 10**(-4) # in %, how many sites 
+    lc_calib = lc_modern %>% select(any_of(c("Dataset_ID", include_calib_codes)))
+    n_below = apply(lc_calib %>% select(-Dataset_ID), 2, function(u) length(which(u < thresh_del_lc)))
+    barplot(height = n_below,
+            names = names(n_below), 
+            main = paste0("Number of sites within the calibration map\nthat have a landcover percentage below a threshhold of ", thresh_del_lc, "%"),
+            sub = paste0("Total number of sites in calibration area: ", nrow(psas %>% filter(psas$Intersects_calibMap))),
+    ylab = "n", xlab = "land cover class")
+    # for this region we decide to exclude classes 40 and 50
+    del_classes = c(40, 50)
+    
+    if (length(del_classes) > 0){
+        lc_modern = lc_modern %>% select(any_of(c("Dataset_ID", setdiff(include_calib_codes, del_classes))))
+        include_calib_codes = setdiff(include_calib_codes, del_classes)
+        include_calib_names = setdiff(include_calib_names, paste0("LC", del_classes))
+    }
+}   
+    
+```
+
+
+```{r translation_model, fig.height=12, fig.width=16}
+
+# settings
+{
+    meta_veg = c("Dataset_ID", "Age", "Intersects_regMap", "Intersects_calibMap")
+    meta_lc = c("Dataset_ID")
+
+    k_folds = 100 # (integer: number of folds, or character: "loo": leave-one-out cross validation, i.e. k = nr. sites)
+    
+    # tuning nr. of predictor
+    min_cont_mean_taxa = 10**(-2) # (%)
+    min_cont_sd_taxa = 10**(-2) # = (%)
+    min_sum_abs_cor_ys = 0.5
+    max_cor_among_taxa = 0.9
+    max_nr_predictors = 100 # to increase speed of tuning stop after this number of taxa comparing the training and validation metrics
+    
+    # plotting
+    sig_level = 0.05
+    show_top_var_taxa_in_matrix = 25
+}
+
+# tune_taxa i.e. tuning the number of the orginial or preselected taxa does not work currently.
+# this step improves the model quality, but would need to be improved anyway with a feature selection method which is available in several packages
+
+vegLcModel(veg_modern = veg_modern, meta_cols_veg = meta_veg, 
+           lc_modern = lc_modern, meta_cols_lc = meta_lc, 
+           prefilter_taxa = T, tune_taxa = F, 
+           save_folder = file.path(main_dir, "interim_results", "vegLcModel"))
+results = load_rda(file.path(main_dir, "interim_results", "vegLcModel", "vegLcModel.rda"))
+
+veg_lc_model = results$model_full_set
+mean_MAE = results$mean_metric # (%)
+sd_MAE = results$sd_metric # (%)
+mean_MAE_per_class = results$mae_per_class # (%)
+sd_MAE_per_class = results$sd_per_class # (%)
+```
+
+
+
+## prediction of (past) land cover for all sites in regionMap
+
+```{r prediction of land cover, fig.height=12, fig.width=16}
+# use the model to predict all sites
+{
+    # prepare the past veg_cover_interp set and predict for all sites and past ages
+    x_full = veg_cover_interp[, veg_cols]
+    
+    y_pred_full = predict(model_full_set, x_full)
+    
+    # shifting to minimum 0 % and rescaling to 100% row sums is part of the model here
+    {
+        rowsums = as.numeric(apply(y_pred_full, 1, sum))
+        round(max(rowsums)*100, 1)
+        round(mean(rowsums)*100, 1) + round(sd(rowsums)*100, 1)
+        round(median(rowsums)*100, 1)
+        round(mean(rowsums)*100, 1) - round(sd(rowsums)*100, 1)
+        round(min(rowsums)*100, 1)
+        max(y_pred_full)*100
+        min(y_pred_full)*100
+        
+        # add lowest value per row to get rid of negative probabilites
+        y_pred_full = t(apply(y_pred_full, 1, 
+                                   function(u){
+                                       if (any(u < 0)){
+                                           u = u - min(u)     
+                                       } else{
+                                           u
+                                       }
+                                   }))
+        row_sums = apply(y_pred_full, 1, sum)
+        row_sums[row_sums == 0] = 1
+        y_pred_full = y_pred_full / row_sums
+        
+        rowsums = as.numeric(apply(y_pred_full, 1, sum))
+        round(max(rowsums)*100, 1)
+        round(mean(rowsums)*100, 1) + round(sd(rowsums)*100, 1)
+        round(median(rowsums)*100, 1)
+        round(mean(rowsums)*100, 1) - round(sd(rowsums)*100, 1)
+        round(min(rowsums)*100, 1)
+        max(y_pred_full)*100
+        min(y_pred_full)*100
+    }
+    
+    y_pred_full = data.frame(Dataset_ID = veg_cover_interp$Dataset_ID,
+                                  Age_BP = veg_cover_interp$Age_BP,
+                                  y_pred_full)
+    
+    x_full = data.frame(Dataset_ID = veg_cover_interp$Dataset_ID,
+                             Age_BP = veg_cover_interp$Age_BP,
+                             x_full)
+    
+    write.table(x_full, 
+                file.path(results_calib_dir,
+                          paste0("x_full_", model_name, "_",
+                                 subset_title,".csv")),
+                sep="\t", row.names=F)
+    write.table(y_pred_full, 
+                file.path(results_calib_dir, 
+                          paste0("y_pred_full_",  model_name, "_",
+                                 subset_title,".csv")),
+                sep="\t", row.names=F)
+    
+    # rel. temporal variance in the past per landcover class
+    {
+        rel_var_sites_reg_wo_ic = round((apply(df_pred[,y_names], 2, sd, na.rm=T) / 
+                                             apply(df_pred[,y_names], 2, mean, na.rm=T) * 100),
+                                        1)
+        cat("\n\nRelative temporal Variance over sites on full data:",
+            "\n", paste0("\n\t", names(rel_var_sites_reg_wo_ic), 
+                         "\t", rel_var_sites_reg_wo_ic))
+        model_stats_reg_wo_ic["Mean_Rel_Sd_To_Mean"] = mean(rel_var_sites_reg_wo_ic, na.rm=T)
+    }
+}
+```        

@@ -7,17 +7,42 @@
 #' @author Peter Ewald and Simeon Lisovski.
 NULL
 
+
+setClass(
+  "psaVeg",
+   slots = c(regMap     = "sfc_MULTIPOLYGON",
+             calibMap   = "sf",
+             psas       = "sf",
+             vegetation = "data.frame")
+)
+
+setMethod("plot", "psaVeg", function(x) {
+  
+  ps_poly <- psaVeg@psas %>% left_join(psaVeg@vegetation %>% group_by(Dataset_ID) %>% summarise(oldestAge = max(Age)), by = 'Dataset_ID')
+  
+  ggplot() +
+    geom_sf(psaVeg@calibMap, mapping = aes(geometry = geometry, fill = groups)) +
+    scale_fill_brewer(palette = "Set3", name = "Calibration groups") +
+    ggnewscale::new_scale_fill() +
+    geom_sf(psaVeg@regMap, mapping = aes(geometry = geometry), fill = adjustcolor("white", alpha.f = 0.3)) +
+    geom_sf(psaVeg@regMap %>% st_bbox() %>% st_as_sfc() , mapping = aes(geometry = geometry), linewidth = 0.6, fill = NA) +
+    geom_sf(ps_poly, mapping = aes(geometry = geometry), alpha = 0.2) +
+    # scale_fill_gradientn(colours = c("darkred", "aliceblue")) +
+    theme_light()
+})
+
+
 ## Data import
 ##'
-##' The function \code{psaMap} loads all vegetation cover files from the specified folder, builds pollen source areas (PSA), i.e. circular polygons around the site's centres with its pollen source radius. 
+##' The function \code{make_psaVeg} loads all vegetation cover files from the specified folder, builds pollen source areas (PSA), i.e. circular polygons around the site's centres with its pollen source radius. 
 ##' The vegetation cover is filtered to all PSAs within the two maps provided (for computing past land cover and for the calibration of the model for vegetation cover to land cover translation.)
-##' @title psaMap
+##' @title make_psaVeg
 ##' @param veg_folder character, absolute path to the folder where vegetation cover files were copied to
 ##' @param regMap sfc_MULTIPOLYGON, map for that the land cover change shall be computed
 ##' @param calibMap sfc_MULTIPOLYGON, map from which sites are selected to build the translation model from vegetation cover to landcover time series
 ##' @param save_folder character, absolute path to the directory where the results list and if plt == T the plots are saved to
 ##' @param plt boolean, whether to plot the pollen source areas, the number of samples per site, and the oldest age of the samples per site within the maps passed
-##' @return a list object
+##' @return a psaVeg object
 ##' \item{\code{data.frame}}{veg_cover: vegetation cover in % per taxon with Dataset_ID, Age, Intersects_regMap, Intersects_calibMap columns}
 ##' \item{\code{...}}{...: ...}
 ##' @importFrom data.table fread
@@ -34,22 +59,25 @@ NULL
 ##' @importFrom sf st_make_valid
 ##' @importFrom sf st_buffer
 ##' @export
-psaMap <- function(veg_folder, regMap, calibMap, save_folder = NULL, plt = T) {
+make_psaVeg <- function(veg_folder, regMap, calibMap, silent = TRUE) {
   
-  # packages needed: data.table, sf, dplyr,rnaturalearth
+  # packages needed: data.table, sf, dplyr, rnaturalearth
   
-  sf_use_s2(F)
+  if(sf_use_s2()) sf_use_s2(F)
   return_list = list()
   
   # load vegetation and meta data
   {
-    cat("\nLoad meta and vegetation data\n")
+    if(!silent) cat("\nLoad meta and vegetation data\n")
+    
     # read vegetation cover and meta data
     file_names <- list.files(veg_folder)
+   
     veg_cover <- lapply(file_names, 
                         function(x) {
-                          veg_cov = data.table::fread(file.path(veg_folder, x))
+                          veg_cov = data.table::fread(file.path(veg_folder, x), verbose = !silent, showProgress = !silent)
                         })
+    
     names(veg_cover) <- file_names
     
     # extract meta data
@@ -62,243 +90,72 @@ psaMap <- function(veg_folder, regMap, calibMap, save_folder = NULL, plt = T) {
                                       })))
     centres = meta_data %>% sf::st_as_sf(coords = c("Longitude", "Latitude")) %>% sf::st_set_crs(4326)
 
-    # extract vegetation cover (Dataset_ID, Age, and taxa percentages)
-    veg_cover = lapply(1:length(veg_cover),
-                       function(x){
-                         veg_cov = veg_cover[[x]] %>%
-                           dplyr::select(all_of(c("Dataset_ID", 
-                                           grep("mean", colnames(veg_cover[[x]]), value = T))))
-                         colnames(veg_cov) = gsub(" [mean of cover in %]", "", 
-                                                  colnames(veg_cov), fixed = T)
-                         colnames(veg_cov) = gsub("_mean [yrs BP]", "", 
-                                                  colnames(veg_cov), fixed = T)
-                         return(veg_cov)
-                       })
-    for (ii in 1:length(veg_cover)){
-      if (ii == 1){
-        veg_cover_full = veg_cover[[ii]]
-      } else{
-        veg_cover_full = suppressMessages(
-          veg_cover_full %>% dplyr::full_join(veg_cover[[ii]])
-        )
-      }
-    } 
-    veg_cover = veg_cover_full  %>% as.data.frame(); rm(veg_cover_full) 
-    
-    return_list$veg_cover = veg_cover
-    return_list[["meta_data"]] = list()
-    return_list$meta_data[["centres"]] = centres
   }
   
-  # create map with pollen source areas based on provided maps
+  
+  ## Create map with pollen source areas
   {
-    cat("\nCreate map with pollen source areas")
+    if(!silent) cat("\nCreate map with pollen source areas")
     
     # project sites to target geometry from maps
     if (!(st_crs(regMap) == st_crs(calibMap))){
       stop("The same projection for the region and calibration map must be provided.")
     }
-    centres = centres %>% st_transform(st_crs(regMap))
     
     # filter sites in any regMap or calibrationMap
-    all_maps = st_union(st_union(regMap, calibMap$geometry))
-    intersects = st_intersects(centres$geometry, all_maps, sparse = F)
-    centres = centres[intersects,]
-    
-    # build psas, enlarge maps (such that all psas fit in; seperately for calibMap and regMap)
-    psas = centres %>% st_buffer(.$`Pollen_Source_Radius [m]`)  
-    all_calibMaps = st_union(calibMap)
-    worldMap  <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf") %>%
-      st_shift_longitude() %>% st_transform(st_crs(regMap)) %>% st_make_valid()
-    intersects = data.frame(Dataset_ID = psas$Dataset_ID,
-                            Intersects_regMap = st_intersects(psas$geometry, regMap, sparse = F),
-                            Intersects_calibMap = st_intersects(psas$geometry, all_calibMaps, sparse = F))
-    psas = psas %>% left_join(intersects, by = "Dataset_ID")
-    centres = centres %>% left_join(intersects, by = "Dataset_ID")
-    regMap = st_bbox(regMap %>% st_union(psas %>% filter(Intersects_regMap) %>% pull(geometry))) %>% 
-      st_as_sfc() %>% st_set_crs(st_crs(regMap))
-    regMap = suppressWarnings(
-      worldMap %>% st_intersection(regMap) %>% dplyr::select(geometry) %>% st_buffer(50) %>% st_union()
-    )
-    calibMap = suppressWarnings(
-      st_bbox(all_calibMaps %>% st_union(psas %>% filter(Intersects_calibMap) %>% pull(geometry))) %>% 
-      st_as_sfc() %>% st_set_crs(st_crs(calibMap))
-    )
-    calibMap = suppressWarnings(
-      worldMap %>% st_intersection(calibMap) %>%  
-        dplyr::select("continent") %>% rename(groups = continent) %>% group_by(groups) %>% 
-        summarize(geometry = st_union(st_buffer(geometry, 20)))
-    )
-    
-    # return enlarged maps
-    return_list$meta_data[["regMap"]] = regMap
-    return_list$meta_data[["calibMap"]] = calibMap
-    return_list$meta_data[["psas"]] = psas
-    return_list$meta_data[["centres"]] = centres
+    psas = centres %>% st_transform(st_crs(regMap)) %>%
+      filter(c(st_intersects(., st_union(st_union(regMap, calibMap$geometry)), sparse = FALSE))) %>%
+      mutate(calibMap = calibMap$groups[unlist(apply(st_intersects(., calibMap, sparse = FALSE), 1, function(x) if(any(x)) which(x) else NA))],
+             regMap   = c(st_intersects(., regMap, sparse = FALSE))) %>%
+      st_buffer(.$`Pollen_Source_Radius [m]`) %>% relocate(geometry, .after = last_col())
   }
+
   
   # filter vegetation data based on selected pollen source areas, drop taxa not present, and normalize rows to 1
   {
-    cat("\nFilter vegetation data within maps")
     
-    # filter sites if in any map
-    veg_cover = veg_cover %>% 
-      left_join(intersects, by = "Dataset_ID")
-    meta_cols_veg = c("Dataset_ID", "Age", c("Intersects_regMap", "Intersects_calibMap"))
-    veg_cover = veg_cover %>% filter(Intersects_regMap | Intersects_calibMap) 
+    if(!silent) cat("\nFilter vegetation data within maps")
     
-    # remove samples with no age and replace any NA percentage with 0
-    veg_cover = veg_cover %>% filter(!is.na(Age)) %>% 
-      mutate(across(where(is.numeric), ~replace_na(.x, 0)))
+    # extract vegetation cover (Dataset_ID, Age, and taxa percentages)
+    veg_cover_filtered = lapply(veg_cover,
+                                function(x){
+                                  veg_cov_out = x %>% filter(Dataset_ID %in% psas$Dataset_ID)
+                                  if(nrow(veg_cov_out)>0) {
+                                    veg_cov_out <- veg_cov_out %>% dplyr::select(all_of(c("Dataset_ID",
+                                                                                          grep("mean", colnames(x), value = T))))
+                                    colnames(veg_cov_out) = gsub(" [mean of cover in %]", "",
+                                                                 colnames(veg_cov_out), fixed = T)
+                                    colnames(veg_cov_out) = gsub("_mean [yrs BP]", "",
+                                                                 colnames(veg_cov_out), fixed = T)
+                                    veg_cov_out
+                                  } else NULL
+                                })
+    
+    suppressMessages({
+    veg_cover_filtered <- veg_cover_filtered[!sapply(veg_cover_filtered, is.null)] %>% 
+      Reduce("full_join", .)  %>%
+      filter(!is.na(Age)) %>% 
+      mutate(across(where(is.numeric), ~replace_na(.x, 0))) %>% as.data.frame()
+    })
     
     # reorder columns
-    veg_cover = veg_cover[,c(meta_cols_veg, 
-                             colnames(veg_cover)[!(colnames(veg_cover) %in% meta_cols_veg)])]
+    veg_cover_filtered = veg_cover_filtered[,c(meta_cols_veg[meta_cols_veg %in% colnames(veg_cover_filtered)], 
+                                               colnames(veg_cover_filtered)[!(colnames(veg_cover_filtered) %in% meta_cols_veg)])] %>%
+                         dplyr::select(-which(apply(veg_cover_filtered, 2, sum)==0))
     
-    # drop taxa not present at any site
-    taxa_cols_veg = colnames(veg_cover)[!(colnames(veg_cover) %in% meta_cols_veg)]
-    taxa_cols_veg = names(which(!apply(veg_cover[,taxa_cols_veg], 2, function(u) all(u == 0))))
-    veg_cover = veg_cover[, c(meta_cols_veg, taxa_cols_veg)]
+    veg_cover_filtered[,-c(1,2)] <- t(apply(veg_cover_filtered[,-c(1,2)],  1, function(u) u/sum(u)))
     
-    # normalize all taxa to 1
-    veg_cover = data.frame(veg_cover[,meta_cols_veg],
-                            t(apply(veg_cover[,taxa_cols_veg], 1, function(u){ u/sum(u) }))) 
-    
-    # return vegetation cover
-    return_list$veg_cover = veg_cover
   }
   
-  # plot sites and vegetation oldest /nr. of vegetation samples
-  if (plt){
-    
-    # plot all PSAs on regionMap and calibMap
-    {
-      cat("\nPlot Pollen Source areas within the region map")
-      if (!is.null(save_folder)){
-        png(file.path(save_folder, paste0("pollen_source_areas_regMap.png")),
-            width = 1200, height = 800)
-      }
-      plot(regMap, border = "grey10", lwd = 0.5, 
-           main = paste0(nrow(psas[psas$Intersects_regMap,]), " Pollen Source Areas and site centres within region map"))
-      plot(psas$geometry[psas$Intersects_regMap], col = "darkred", border = NA, add = T)
-      plot(centres$geometry[psas$Intersects_regMap], pch = 3, size = .5, col = "white", add = T)
-      if (!is.null(save_folder)){ dev.off() }
-      
-      cat("\nPlot Pollen Source areas within the calibration map")
-      if (!is.null(save_folder)){
-        png(file.path(save_folder, paste0("pollen_source_areas_calibMap.png")),
-            width = 1200, height = 800)
-      }
-      plot(calibMap$geometry, border = "grey10", lwd = 0.5, 
-           main = paste0(nrow(psas[psas$Intersects_calibMap,]), " Pollen Source Areas and site centres within calibration map"))
-      plot(psas$geometry[psas$Intersects_calibMap], add = T, col = "darkred", border = NA)
-      plot(centres$geometry[psas$Intersects_calibMap], pch = 3, size = .5, col = "white", add = T)
-      if (!is.null(save_folder)){ dev.off() }
-    }
-    
-    # plot oldest samples and number of samples per site
-    {
-      cat("\nPlot number of and age of oldest pollen samples per site")
-      # prepare plot data frame
-      plt_df = centres %>% 
-        left_join(veg_cover %>% group_by(Dataset_ID) %>% summarize(Oldest_Sample = max(Age)), by = "Dataset_ID") %>%
-        left_join(veg_cover %>% group_by(Dataset_ID) %>% summarize(Nr_Samples = length(Age)), by = "Dataset_ID") %>% 
-        mutate(x = st_coordinates(geometry)[,1], y = st_coordinates(geometry)[,2])
-      
-      # plot number of samples within calibration map
-      plt = ggplot() +
-        geom_sf(data = calibMap$geometry, fill='darkgreen', alpha = 0.25) +
-        geom_point(data = plt_df %>% filter(Intersects_calibMap), 
-                   aes(x = x, y = y, 
-                       colour = Nr_Samples, 
-                       size = Nr_Samples)) + 
-        scale_colour_distiller(palette = "YlOrBr", direction = 1) +
-        labs(x = "Longitude", y = "Latitude", title=paste0("Number of pollen samples per site within calibration map"),
-             colour = "Number of pollen samples",
-             size = "Number of pollen samples") +
-        theme_minimal()
-      if (!is.null(save_folder)){
-        png(file.path(save_folder, paste0("number_pollen_samples_calibMap.png")),
-            width = 1200, height = 800)
-        print(plt)
-        dev.off()
-      } else{
-        print(plt)
-      }
-      
-      # plot number of samples within region map
-      plt = ggplot() +
-        geom_sf(data = regMap, fill='darkgreen', alpha = 0.25) +
-        geom_point(data = plt_df %>% filter(Intersects_regMap), 
-                   aes(x = x, y = y, 
-                       colour = Nr_Samples, 
-                       size = Nr_Samples)) + 
-        scale_colour_distiller(palette = "YlOrBr", direction = 1) +
-        labs(x = "Longitude", y = "Latitude", title=paste0("Number of pollen samples per site within region map"),
-             colour = "Number of pollen samples",
-             size = "Number of pollen samples") +
-        theme_minimal()
-      if (!is.null(save_folder)){
-        png(file.path(save_folder, paste0("number_pollen_samples_regMap.png")),
-            width = 1200, height = 800)
-        print(plt)
-        dev.off()
-      } else{
-        print(plt)
-      }
-     
-      # plot oldest age of samples within calibration map
-      plt = ggplot() +
-        geom_sf(data = calibMap$geometry, fill='darkgreen', alpha = 0.25) +
-        geom_point(data = plt_df %>% filter(Intersects_calibMap), 
-                   aes(x = x, y = y, 
-                       colour = Oldest_Sample, 
-                       size = Oldest_Sample)) + 
-        scale_colour_distiller(palette = "YlOrBr", direction = 1) +
-        labs(x = "Longitude", y = "Latitude", title=paste0("Age of oldest pollen sample per site within calibration map"),
-             colour = "Age of oldest pollen sample",
-             size = "Age of oldest pollen sample") +
-        theme_minimal()
-      if (!is.null(save_folder)){
-        png(file.path(save_folder, paste0("oldest_pollen_samples_calibMap.png")),
-            width = 1200, height = 800)
-        print(plt)
-        dev.off()
-      } else{
-        print(plt)
-      }
-      
-      # plot oldest age of samples within region map
-      plt = ggplot() +
-        geom_sf(data = regMap, fill='darkgreen', alpha = 0.25) +
-        geom_point(data = plt_df %>% filter(Intersects_regMap), 
-                   aes(x = x, y = y, 
-                       colour = Oldest_Sample, 
-                       size = Oldest_Sample)) + 
-        scale_colour_distiller(palette = "YlOrBr", direction = 1) +
-        labs(x = "Longitude", y = "Latitude", title=paste0("Age of oldest pollen sample per site within region map"),
-             colour = "Age of oldest pollen sample",
-             size = "Age of oldest pollen sample") +
-        theme_minimal()
-      if (!is.null(save_folder)){
-        png(file.path(save_folder, paste0("oldest_pollen_samples_regMap.png")),
-            width = 1200, height = 800)
-        print(plt)
-        dev.off()
-      } else{
-        print(plt)
-      }
-    }
-  }
   
-  # save or return results
-  if (is.null(save_folder)){ 
-    return(return_list) 
-  } else{
-    fl_name =  file.path(save_folder, "psaMap.rda")
-    cat("\nSave to file", fl_name)
-    save(return_list, file = fl_name)
-  }
+  new(
+    "psaVeg",
+    regMap = regMap,
+    calibMap = calibMap,
+    psas = psas,
+    vegetation = veg_cover_filtered
+  )
+  
 }
 
 ## interpolate vegetation cover
@@ -1612,11 +1469,28 @@ vegLcModel = function(veg_modern, meta_cols_veg,
 # ////////////////////////////////
 # helper functions (not exported)
 
-create_subfolders = function(x, folder_path, indent=1) {
+create_subfolders = function(folder_path, dirs = NULL, default = TRUE, silent = TRUE, indent = 1) {
+  
+  if(default) {
+    x = list("settings" = list(),
+             "data" = list(),
+             "interim_results" = list(psaMap = list(),
+                                      interpVegTS = list(),
+                                      modernVegShares = list(),
+                                      modernLCShares = list(),
+                                      vegLcModel = list(),
+                                      vegLcPrediction = list()),
+             "results" = list())
+  } else {
+    if(is.null(dirs) | class(dirs)!="list") {
+      stop("Subfolders are only accepted as named lists.")
+    } else x = dirs
+  }
   
   if (!file.exists(folder_path)){ dir.create(folder_path) }
   
   if ((is.list(x)) & (length(x) >= 1)){
+    
     for (ii in 1:(length(x))){
       folders = x[[ii]]
       if (!all(sapply(folders, class) == "list")){
@@ -1624,28 +1498,36 @@ create_subfolders = function(x, folder_path, indent=1) {
       }
       folder_name = names(x)[ii]
       stop_at_last = F
+      
       if (is.null(folder_name)){
         folder_name = names(folders)[1]
         stop_at_last = T
       } 
+      
       folder_name = gsub(" ", "", folder_name)
       
-      cat("\n",paste0(rep("\t", indent, collapse=T)), folder_name)
+      if(!silent) cat("\n",paste0(rep("\t", indent, collapse=T)), folder_name)
+      
       final_path = file.path(folder_path, gsub(" ", "", folder_name))
+      
       if (!file.exists(final_path)){
         dir.create(final_path)
       }
       
       if (length(folders) >= 1){
+        
         if (!stop_at_last){
-          create_subfolders(x = folders, folder_path = file.path(folder_path, folder_name), 
+          
+          create_subfolders(folder_path = file.path(folder_path, folder_name), dirs = folders, default = FALSE,
                             indent = indent+1)
+          
         }
       } 
     }
     
-    if (indent == 1) { cat("\n\n") }
+    if (!silent & indent == 1) { cat("\n\n") }
   }
+  
 }
 
 load_rda = function(file_name){
