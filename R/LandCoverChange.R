@@ -155,9 +155,10 @@ psaMap <- function(veg_folder, regMap, calibMap, save_folder = NULL, plt = T) {
     veg_cover = veg_cover[,c(meta_cols_veg, 
                              colnames(veg_cover)[!(colnames(veg_cover) %in% meta_cols_veg)])]
     
-    # drop taxa not present at any site
+    # drop taxa not present at any site and if existing an "Indeterminable" column (taxa in pollen cores not determined)
     taxa_cols_veg = colnames(veg_cover)[!(colnames(veg_cover) %in% meta_cols_veg)]
     taxa_cols_veg = names(which(!apply(veg_cover[,taxa_cols_veg], 2, function(u) all(u == 0))))
+    taxa_cols_veg = taxa_cols_veg[taxa_cols_veg != "Indeterminable"]
     veg_cover = veg_cover[, c(meta_cols_veg, taxa_cols_veg)]
     
     # normalize all taxa to 1
@@ -318,11 +319,14 @@ modernVegShares = function(veg_cover,
                            save_folder = NULL){
   
   taxa_cols_veg = colnames(veg_cover %>% select(-all_of(meta_cols_veg)))
-  veg_modern = veg_cover %>% filter(Intersects_calibMap) %>% filter(Age <= time_span_modern)
+  veg_modern = veg_cover %>% 
+    filter(Age <= time_span_modern)
   veg_modern = as.data.frame(veg_modern[,c("Dataset_ID", taxa_cols_veg)] %>%
                                group_by(Dataset_ID) %>%
-                               summarise(across(everything(), mean, na.rm=T)))
+                               summarise(across(everything(), mean, na.rm=T))) %>% 
+    left_join(veg_cover %>% select(all_of(meta_cols_veg)) %>% select(-Age), by = "Dataset_ID")
   row.names(veg_modern) = NULL
+  veg_modern = veg_modern[, c(meta_cols_veg[meta_cols_veg != "Age"], colnames(veg_modern %>% select(-any_of(meta_cols_veg))))]
   
   if (!is.null(save_folder)){
     save(veg_modern, file = file.path(save_folder, "modernVegShares.rda"))
@@ -1368,16 +1372,16 @@ vegLcModel = function(veg_modern, meta_cols_veg,
     
     # extract how well prediction of props normalized to 1 and probs between 0 .. 1 worked
     {
-      cat(paste0("\nShow how well the conditions for probability ", 
-                 "distributions (compositions) are met:\n"))
-      norm_errors = do.call(rbind,lapply(cv_results$folds, function(u){
-        do.call(cbind,u$rescaled)
-      }))
-      round(apply(norm_errors, 2, mean),4)
+      # cat(paste0("\nShow how well the conditions for probability ", 
+      #            "distributions (compositions) are met:\n"))
+      # norm_errors = do.call(rbind,lapply(cv_results$folds, function(u){
+      #   do.call(cbind,u$rescaled)
+      # }))
+      # round(apply(norm_errors, 2, mean),4)
     }
     
     if (tune_taxa){
-      # keep only predictors with highest st. dev. from tuning 
+      # keep only predictors which was tuned to be the best number 
       # (pred_rel_variation_perc % of the total variation with all predictors)
       cols_veg = cv_results$tuning$cols_veg
       
@@ -1475,7 +1479,7 @@ vegLcModel = function(veg_modern, meta_cols_veg,
           "\n\tMean +/- SD of metric", round(mean_metric, 4), "+/-", 
           round(sd_metric, 4))
       #metric_full_set = cv_results$results_full_set$metric
-      #model_full_set = cv_results$model_full_set
+      model_full_set = cv_results$model_full_set
       
       # per lc class
       mae_per_class = cv_results$mean_mae_per_class; names(mae_per_class) = cols_lc
@@ -1527,18 +1531,18 @@ vegLcModel = function(veg_modern, meta_cols_veg,
                                       values_to = "LC_Share")
         # add information if taxa significant for lc class
         {
-          translation_df = do.call(rbind, lapply(lc_class_inds,
+          translation_df = do.call(rbind, lapply(1:length(lc_classes),
                                                  function(u){
                                                    df1 = translation_df %>% 
                                                      filter((Landcover_Class == 
                                                                lc_classes[u]) & 
-                                                              (Taxon %in% sig_taxa[[u]]))
-                                                   df1["Significant"] = T
+                                                              (Taxon %in% sig_taxa[[u]])) %>%
+                                                     mutate(Significant = T)
                                                    df2 = translation_df %>% 
                                                      filter((Landcover_Class == 
                                                                lc_classes[u]) &
-                                                              !(Taxon %in% sig_taxa[[u]]))
-                                                   df2["Significant"] = F
+                                                              !(Taxon %in% sig_taxa[[u]])) %>% 
+                                                     mutate(Significant = F)
                                                    return(rbind(df1, df2))
                                                  }))
         }
@@ -1596,7 +1600,8 @@ vegLcModel = function(veg_modern, meta_cols_veg,
     }
   }
   
-  return_list = list(model_full_set = model_full_set, 
+  return_list = list(model_full_set = model_full_set, cols_veg = cols_veg,
+                     veg_lc_mat = A,
                      mean_metric = mean_metric, sd_metric = sd_metric,
                      mae_per_class = mae_per_class, sd_per_class = sd_per_class)
   
@@ -1607,7 +1612,238 @@ vegLcModel = function(veg_modern, meta_cols_veg,
   }
 }
 
+## ...
+##'
+##' 
+##' @title predictLcExplOnly
+##' @param 
+##' save_folder
+##' @return ...
+##' \item{\code{...}}{...: ...}
+##' @importFrom dplyr filter
+##' @export
+predictLcExplOnly = function(model, veg_predictors, meta_cols){
+  
+  # predict the landcover that is explained by the vegetation cover
+  {
+    cols_veg = colnames(veg_predictors %>% select(-all_of(meta_cols)))
+    x = veg_predictors[, cols_veg]
+    y_pred = cbind(veg_predictors[, meta_cols],
+                   predict(model, x)) %>% 
+      filter(rowSums(.)!=0)
+  }
+  
+  # shifting to minimum 0 % and rescaling to 100% row sums is part of the model
+  {
+    lc = y_pred %>% select(-all_of(meta_cols))
+    
+    # add lowest value per row to get rid of negative probabilites
+    lc = t(apply(lc, 1, 
+                 function(u){
+                   if (any(u < 0, na.rm = T)){
+                     u = u - min(u, na.rm = T)     
+                   } else{
+                     u
+                   }
+                 }))
+    
+    row_sums = apply(lc, 1, sum, na.rm = T)
+    row_sums[row_sums == 0] = 1
+    lc = lc / row_sums
+    row_sums = apply(lc, 1, sum, na.rm = T)
+    
+    y_pred = cbind(y_pred[, meta_cols], lc)
+  }
+  
+  x = data.frame(Dataset_ID = veg_predictors$Dataset_ID,
+                 Age = veg_predictors$Age,
+                 x)
+  
+  return_list = list(x = x, y_pred = y_pred)
+  return(return_list)
+}
 
+
+## ...
+##'
+##' 
+##' @title predictLcAllClasses
+##' @param 
+##' save_folder
+##' @return ...
+##' \item{\code{...}}{...: ...}
+##' @importFrom dplyr filter
+##' @export
+predictLcAllClasses = function(lc_veg_only, lc_all_classes, verb = 0){
+  
+  # normalize extracted land cover shares in PSAs or percentages to 1
+  lc_all_classes[-1] = lc_all_classes[,-1] / apply(lc_all_classes[, -1], 1, sum) 
+  
+  IDs = unique(lc_veg_only$Dataset_ID)
+  for (ID in IDs){
+    
+    # filter modern with all classes
+    {
+      y_all_site = lc_all_classes %>% filter(Dataset_ID == ID) %>% mutate(Origin = "Actual", Age = -1000)  # place holder age for the modern period
+      y_all_site = y_all_site[,c("Dataset_ID", "Age", "Origin", 
+                                 colnames(y_all_site %>% select(-all_of(c("Dataset_ID", "Age", "Origin")))))]
+    }
+    
+    # filter only classes explained by vegetation for actual extracted (from land cover map) and predicted
+    {
+      y_veg_pred_site = lc_veg_only %>% filter(Dataset_ID == ID) %>% mutate(Origin = "Predicted")
+      y_veg_actual_site = y_all_site %>% select(all_of(c("Dataset_ID", "Age", "Origin", as.character(include_calib_codes)))) 
+      site_df = rbind(y_veg_actual_site, y_veg_pred_site)
+      site_df = site_df[, c("Dataset_ID", "Age", "Origin", as.character(include_calib_codes))]
+    }
+    
+    # renormalize shares
+    {
+      # recalculate probs with all classes included in calibration and prediction
+      # and add excluded (either with constant probs or set to zero)
+      # 1st go back to actual share in psa of vegetation classes ('includeded in calibration')
+      {
+        #apply(site_df[,-c(1:3)], 1, sum)
+        perc_calib = sum(y_all_site[, as.character(include_calib_codes)])
+        site_df[,-c(1:3)] = site_df[,-c(1:3)] * perc_calib /
+          (apply(site_df[,-c(1:3)], 1, sum))
+        apply(site_df[,-c(1:3)], 1, sum)
+        
+        y_all_site = (y_all_site %>% select(-Dataset_ID, -Age, -Origin))
+        sum(y_all_site)
+      }
+      
+      # 2nd share of excluded classes
+      {
+        excl_classes_present = as.character(exclude_calib_codes)[which(as.character(exclude_calib_codes) %in% colnames(lc_all_classes))]
+        y_exc_site = y_all_site[,excl_classes_present]
+        perc_exc = sum(y_exc_site)
+        abs(1 - perc_calib - perc_exc) <= 10**(-3)
+      }
+      
+      # 3rd now differentiate excluded classes, i.e. set defined classes to zero
+      # others keep constant and renormalize all
+      {
+        const_cols_present = as.character(keep_const_codes)[which(as.character(keep_const_codes) %in% 
+                                                                    colnames(y_all_site))]
+        y_exc_const_site = y_all_site[,const_cols_present] 
+        perc_keep_constant = sum(y_exc_const_site) 
+        
+        zero_cols_present = as.character(set_zero_codes)[which(as.character(set_zero_codes) %in% 
+                                                                 colnames(y_all_site))]
+        y_exc_zero_site = y_all_site[,zero_cols_present]
+        perc_set_zero = sum(y_exc_zero_site) 
+        abs(perc_exc - (perc_keep_constant + perc_set_zero)) <= 10**(-3)
+        y_exc_zero_site[,names(y_exc_zero_site)] = 0
+      }
+      
+      # 4th renormalize predicted including the set zero columns 
+      # i.e. multiply with amplification factor
+      {
+        y_pred_new_site = cbind(site_df %>% filter(Origin == "Predicted"), 
+                                y_exc_zero_site)
+        all(abs(apply(y_pred_new_site[,-c(1:3)], 1, sum) - perc_calib) <= 10**(-3))
+        amp_factor = ((perc_calib + perc_set_zero) / perc_calib)
+        y_pred_new_site[,-c(1:3)] = y_pred_new_site[,-c(1:3)] *
+          (amp_factor)
+        
+        all(apply(y_pred_new_site[,-c(1:3)],1,sum) + perc_keep_constant/100 - 1 <= 10**(-3))
+        
+        if (verb > 0){
+          cat(paste0("\n\tSite ",ID,": \n\t\tIncreased share of predicted lc types",
+                     "\n\t\tdue to setting others to zero in the past",
+                     "\n\t\tby a factor of ", 
+                     round(amp_factor,4)))
+        }
+      }
+      
+      # 5th add columns kept constant in share
+      {
+        y_pred_new_site = cbind(y_pred_new_site,
+                                y_exc_const_site)
+        all_cols_present = as.character(all_lc_codes)[which(as.character(all_lc_codes) %in% 
+                                                              colnames(y_pred_new_site))]
+        y_pred_new_site = y_pred_new_site[,c("Dataset_ID", "Age", all_cols_present)]
+        all(abs(apply(y_pred_new_site[,-c(1:2)], 1, sum) - 1) <= 10**(-3))
+      }
+      
+      # do some checks of the landcover shares
+      {
+        all(abs(apply(y_pred_new_site[,-c(1:2)],1,sum) - 
+                  (perc_calib + perc_set_zero + perc_keep_constant)) <= 10**(-3))
+        all(abs(apply(y_pred_new_site[,const_cols_present],1,sum) - 
+                  perc_keep_constant) <= 10**(-3))
+        all(abs(apply(y_pred_new_site[,zero_cols_present],1,sum)) <= 10**(-3))
+        all(abs(apply(y_pred_new_site[,as.character(include_calib_codes)], 1, sum) - 
+                  (perc_calib + perc_set_zero)) <= 10**(-3))
+      }
+      
+      # add the modern time slice 
+      # (that has not been modified by setting classes to zero and amplifying the other classes)
+      {
+        y_pred_new_site = 
+          rbind(y_all_site %>% mutate(Dataset_ID = ID, Age = -1000, .before = 1),
+                y_pred_new_site)
+        
+        # and check set to zero, keep constant, and amplification is correct
+        #y_pred_new_site[, as.character(const_cols_present)] # all slices (actual and predicted) should have the same values
+        #y_pred_new_site[, as.character(zero_cols_present)] # only the modern actual slice should have values
+        apply((y_pred_new_site[, as.character(include_calib_codes)]), 1, sum)[2] / 
+          apply((y_pred_new_site[, as.character(include_calib_codes)]), 1, sum)[1] == amp_factor
+      }
+      
+      # add to data frame with all sites
+      if (ID == IDs[1]){
+        y_pred_new_full = y_pred_new_site
+      } else {
+        y_pred_new_full = rbind(y_pred_new_full, y_pred_new_site)
+      }
+    }
+  }
+  
+  return_list = list(y_pred_all_classes = y_pred_new_full)
+  return(return_list)
+}
+
+## ...
+##'
+##' 
+##' @title predictLC
+##' @param 
+##' save_folder
+##' @return ...
+##' \item{\code{...}}{...: ...}
+##' @importFrom dplyr filter
+##' @export
+predictLC = function(model, veg_predictors, meta_cols, lc_modern,
+                     save_folder = NULL){
+  
+  # predict only the land cover classes predicted by the vegetation cover (normalized to 1)
+  results = predictLcExplOnly(model = model, 
+                              veg_predictors = veg_predictors, 
+                              meta_cols = meta_cols)
+  lc_ts_veg_only = results$y_pred
+  veg_cover_predictors = results$x # if filtered and/or tuned the predictors are less (columns) than the original input to model building
+  rm(results)
+  
+  
+  # calculate real land cover shares within in pollen source areas (as for model building only vegetational classes were normalized to 1)
+  # and set defined classes to zero in the past (e.g. croplands) or keep constant (e.g. water bodies)
+  results = predictLcAllClasses(lc_veg_only = lc_ts_veg_only, 
+                                lc_all_classes = lc_modern,
+                                verb = 0)
+  lc_ts_all = results$y_pred_all_classes
+  rm(results)
+  
+  
+  return_list = list(lc_ts_all = lc_ts_all)
+  
+  if (!is.null(save_folder)){
+    save(return_list, file = file.path(save_folder, "predictLC.rda"))
+  } else{
+    return(return_list)
+  }
+}
 
 # ////////////////////////////////
 # helper functions (not exported)
