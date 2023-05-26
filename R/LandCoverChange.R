@@ -1845,6 +1845,573 @@ predictLC = function(model, veg_predictors, meta_cols, lc_modern,
   }
 }
 
+## ...
+##'
+##' 
+##' @title extractDataPSA
+##' @param 
+##' save_folder
+##' @return ...
+##' \item{\code{...}}{...: ...}
+##' @importFrom dplyr filter
+##' @export
+extractDataPSA = function(poly, landcover, elevation, climate,
+                          save_folder, del_classes = NULL){
+  # check if the pollen source area crosses the date line
+  lons = as.data.frame(st_coordinates(poly))$X
+  if (sign(min(lons)) != sign(max(lons))){
+    # no fix implemented yet, but I think the easiest solution is to shift longitudes (centered in the PSA center, i.e shift the dateline do not tranform the data), 
+    # extract the data (still in wgs84) and shift the longitudes back. I have code that as I did this for Chenzhi, ask me if needed.
+    # basically the st_shift_longitude function is limited to shift 180° and there is no inverse function. I generalized it.
+    # for now skip the site
+    cat("\tSkip this site, repair extraction of data for sites crossing the date line")
+    next
+  }
+  
+  # extract landcover
+  {
+    lc_site = suppressMessages((landcover[poly,,] %>% st_as_stars())[]) # keep this object for dimensions below
+    lc_site = suppressWarnings(
+      lc_site %>% 
+        st_as_sf(crs = 4326) %>% 
+        st_centroid()
+    )
+    coords = as.data.frame(st_coordinates(lc_site))
+    df_site = as.data.frame(lc_site %>% st_drop_geometry())
+    df_site$cell_ind = paste0(ID, "_", 1:nrow(df_site))
+    df_site$x = coords$X; df_site$y = coords$Y; rm(coords)
+    df_site = df_site[,c("cell_ind", "x", "y", "Landcover")]
+  }
+  
+  # extract env. variables with the resolution of the land cover product")
+  {
+    df_site = cbind(df_site,
+                    do.call(cbind, 
+                            lapply(c(list(elevation), climate),
+                                   function(u) {
+                                     #cat("\n\t\tfrom", names(u))
+                                     var_site = suppressMessages(
+                                       as.data.frame(
+                                         st_extract(u, lc_site$geometry) %>%
+                                           st_drop_geometry()
+                                       )) 
+                                     #cat("\tdim: ", dim(var_site))
+                                     return(var_site)
+                                   })))
+    df_site$geometry = lc_site$geometry
+  }        
+  
+  colnames(df_site) = c("cell_ind", "x", "y", "Landcover", "Elevation", names(climate), "geometry")
+  
+  # edit NAs
+  {
+    df_site = df_site %>% mutate(across(all_of(c("gdd0", "gdd5", "gdd10")), 
+                                        ~replace_na(.x, 0)))
+    apply(df_site %>% select(where(is.numeric)), 2, function(u){ sum(is.na(u)) })
+    
+    # drop remaining rows with any NA-value
+    df_site = df_site %>% filter(rowSums(is.na(.)) == 0)
+  }
+  
+  # merge lc classes
+  {
+    cat("\n\t\tMerge to class:")
+    for (merge_class in classes_to_merge){
+      class_inds = which(df_site$Landcover %in% merge_class$old_classes)
+      df_site$Landcover[class_inds] = merge_class$new_class
+      cat("\n\t\t", merge_class$new_class, "-", merge_class$new_label,
+          "-", length(class_inds), "cells.")
+    }
+  }
+  
+  # set classes removed completely (del_classes, see section 'lc_modern_shares' above) to NA, i.e. here, remove the rows
+  {
+    if (!is.null(del_classes)){
+      df_site = df_site %>% filter(!(Landcover %in% del_classes))
+    }
+  }
+  
+  save(df_site, file = file.path(save_folder, paste0("extractDataPSA_", ID, ".rda")))
+}
+
+
+## ...
+##'
+##' 
+##' @title extractDataPSAs
+##' @param 
+##' save_folder
+##' @return ...
+##' \item{\code{...}}{...: ...}
+##' @importFrom dplyr filter
+##' @export
+extractDataPSAs = function(polys, lc_env_folder, clim_flnames, lc_flname, elev_flname,
+                           save_folder = NULL, del_classes = NULL){
+  
+  library(stars); library(sf); sf_use_s2(F)
+  library(dplyr)
+  
+  # load land cover and environmental data sets
+  {
+    landcover = read_stars(file.path(lc_env_folder, lc_flname)) %>%
+      st_set_crs(4326) %>% 
+      setNames("Landcover")
+    
+    elevation = read_stars(file.path(lc_env_folder, elev_flname)) %>% 
+      st_set_crs(4326) %>% setNames("Elevation")
+    
+    # climate
+    {
+      climate = lapply(clim_flnames, 
+                       function(u) {
+                         clim_var = read_stars(file.path(lc_env_folder, u)) %>%
+                           st_set_crs(4326) 
+                         clim_var = setNames(clim_var, u)
+                         return(clim_var)
+                       })
+      
+      names(climate) = clim_vars
+      climate = climate[clim_vars]
+      }
+    
+    env_vars = c("Elevation", clim_vars)
+  }
+  
+  IDs = polys$Dataset_ID
+  cat("\nExtract landcover and environmental data:")
+  for (ID in IDs){
+    cat("\n\n\tID: ", ID)
+    extractDataPSA(poly = polys %>% filter(Dataset_ID == ID),
+                   landcover = landcover, elevation = elevation, climate = climate,
+                   save_folder = save_folder, del_classes = del_classes)
+  }
+}
+
+## ...
+##'
+##' 
+##' @title downsampleForRDA
+##' @param 
+##' save_folder
+##' @return ...
+##' \item{\code{...}}{...: ...}
+##' @importFrom dplyr filter
+##' @export
+downsampleForRDA = function(lc_env_df,
+                            save_folder = NULL){
+  
+  downsample = function(df, class_col){
+    n = min(table(df[[class_col]]))
+    idx = unlist(tapply(1:nrow(df),df[[class_col]],sample,n))
+    df[idx,]
+  }
+  
+  lc_stats = lc_env_df %>% group_by(Landcover) %>% 
+    summarize(Nr_Cells = length(Landcover)) %>%
+    mutate(Share_Cells = Nr_Cells / sum(Nr_Cells)) %>% 
+    arrange(Landcover)
+  
+  lc_env_df$Landcover = factor(lc_env_df$Landcover, levels = sort(unique(lc_env_df$Landcover)))
+  lc_env_downs = downsample(df = lc_env_df, class_col = "Landcover")
+  
+  lc_stats_downs = lc_env_downs %>% 
+    group_by(Landcover) %>% 
+    summarize(Nr_Cells = length(Landcover)) %>%
+    mutate(Share_Cells = Nr_Cells / sum(Nr_Cells))
+  
+  return_list = list(lc_env_downs = lc_env_downs, 
+                     lc_stats_orig = lc_stats, lc_stats_downs = lc_stats_downs)
+  
+  if (!is.null(save_folder)){
+    save(return_list, file = file.path(save_folder, paste0("downsampleForRDA_", ID, ".rda")))
+  } else{
+    return(return_list)
+  }
+}
+
+## ...
+##'
+##' 
+##' @title compute_rda
+##' @param 
+##' save_folder
+##' @return ...
+##' \item{\code{...}}{...: ...}
+##' @importFrom dplyr filter
+##' @export
+compute_rda = function(df, env_cols, significance_tests = F,  
+                       plt_model, width, height){
+  
+  library(vegan)
+  
+  # one-hot-encode land cover type
+  {
+    lc_type = df %>% select(cell_ind, "Landcover") 
+    lc_type$Landcover = as.numeric(as.character(lc_type$Landcover))
+    lc_type = lc_type %>% as_tibble() %>% 
+      pivot_wider(names_from = Landcover,
+                  values_from = Landcover) %>%
+      unnest(all_of(colnames(.)))
+    colnames(lc_type) = c("cell_ind", paste0("LC", colnames(lc_type)[-1]))
+    
+    lc_type = cbind(lc_type$cell_ind,
+                    as.data.frame(t(apply(lc_type[,-1], 1,
+                                          function(u){
+                                            u[!is.na(u)] = 1
+                                            u[is.na(u)] = 0
+                                            u
+                                          }))))
+    lc_type = as.matrix(lc_type[,-1])
+  }
+  
+  # ‘lc’: orthogonal linear combinations of the explanatory variable
+  # ‘wa’: more robust to noise in the environmental variables but are a step between constrained towards unconstrained.
+  #     Most of the time, the default is “wa”. Because these are the most robust to noise in the data.
+  # Scaling for species and site scores: 
+  #     Either site (1)  
+  #     or     species (2)
+  #     scores are scaled by eigenvalues, and the other set of scores is left unscaled, or with 3 both are scaled symmetrically by square root of eigenvalues.
+  
+  rda_scale = F
+  
+  #formula = df[, env_cols] ~ df[, "Landcover"], 
+  formula = as.formula(paste0("df[,env_cols] ~ ", paste0("LC", levels(df$Landcover), collapse = " + ")))
+  rda_model = rda(formula = formula, 
+                  data = as.data.frame(lc_type), #df[, c(env_cols,"Landcover")],
+                  scale = rda_scale)
+  
+  # for comparison do a pca
+  {
+    pca_model = prcomp(df[,env_cols], center = F, scale. = F, tol = 10**(-2))
+    pca_variance = pca_model$sdev / sum(pca_model$sdev)
+    pca_A = pca_model$rotation
+    pca_pred = pca_model$x
+  }
+  
+  # extract model results
+  {
+    R2_adj = RsquareAdj(rda_model)$adj.r.squared
+    eigen_vals_all = eigenvals(rda_model, "all")
+    eigen_vals_constr = eigenvals(rda_model, "constrained")
+    eigen_vals_unconstr = eigenvals(rda_model, "unconstrained")
+    variance_df = data.frame("Axis" = c(names(eigen_vals_constr), names(eigen_vals_unconstr)), 
+                             Variance = c(eigen_vals_constr, eigen_vals_unconstr),
+                             Relative_Variance = c(eigen_vals_constr / sum(eigen_vals_all), 
+                                                   eigen_vals_unconstr / sum(eigen_vals_all))); row.names(variance_df) = NULL
+    
+    # see how prediction is done and how the different scalings change euclidic distances in env space
+    #vars_transf_rds_wa = as.data.frame(rda_model$CCA$wa) ==  predict(rda_model, new_data = df[, env_cols], type = "wa")
+    vars_transf_rds_wa_sc_1 = as.data.frame(scores(rda_model, choices = c(1,2), display = "wa", scaling = 1))
+    #vars_transf_rds_wa_sc_2 = as.data.frame(scores(rda_model, choices = c(1,2), display = "wa", scaling = 2))
+    
+    # check how scaling types differ in scaling over RDA axes
+    #apply(round(vars_transf_rds_wa_sc_1 / vars_transf_rds_wa[,1:2], 6), 2, unique)
+    #apply(round(vars_transf_rds_wa_sc_2 / vars_transf_rds_wa[,1:2], 6), 2, unique)
+    
+    transl_lc_rds = as.data.frame(coef(rda_model))
+    row.names(transl_lc_rds) = gsub("df[, y]", "LC", row.names(transl_lc_rds), fixed = T)
+    
+    # matrix that translates environmental data to RDA axes
+    transl_env_rds = as.data.frame(predict(rda_model, new_data = df[, env_cols], type = "sp"))
+  }
+  
+  # check collinearity and whether to add all predictors
+  {
+    lc_type_vifs = sqrt(vif.cca(rda_model))
+    #cat("\n\t", all(sqrt(vif.cca(rda_model)) < 2, na.rm = T)) # rule of thumb for collinearity too high
+  }
+  
+  # fitted and residuals on env. variables 
+  {
+    residuals = as.data.frame(vegan:::residuals.cca(rda_model))
+    predicted = as.data.frame(predict(rda_model, new_data = df[, env_cols], 
+                                      type = "response")) # scaling has no effect for env. variables, only when predicting RDA values
+    actual = df[, env_cols]
+    #cat("\n\t", all(round(actual - (residuals + predicted), 6) == 0)) 
+    
+    # predicted values can also be directly assessed from the model via fitted function
+    #cat("\n\t", all(round(fitted(rda_model, type = "response", scaling = 1) - predicted, 6) == 0))
+  }
+  
+  # significance tests
+  if (significance_tests){
+    
+    # perform significance tests
+    {
+      sig_global = anova.cca(rda_model)
+      sig_axes = anova.cca(rda_model, by = "axis")
+      sig_axes[which(sig_axes$`Pr(>F)` <= p_val),]
+      sig_terms = anova.cca(rda_model, by = 'terms', step = 100)
+    }
+    
+    # build data frame with axes' significance
+    {
+      sig_df = (as.data.frame(sig_terms) %>% select(all_of("Pr(>F)")))
+      sig_df$P_LC_Axes = row.names(sig_df)
+      colnames(sig_df) = c("P", "Axes"); row.names(sig_df) = NULL
+      sig_df = sig_df[-nrow(sig_df), ]; sig_df = sig_df[,c("Axes", "P")]
+      
+      sig_df = rbind(sig_df, 
+                     as.data.frame(sig_axes) %>% 
+                       mutate("Axes" = row.names(as.data.frame(sig_axes)),
+                              P = !!as.name("Pr(>F)"),
+                              .keep = "none"))
+      sig_df = sig_df[-nrow(sig_df),]; row.names(sig_df) = NULL
+      
+      sig_df = rbind(data.frame(Axes = "Model",
+                                P = sig_global$`Pr(>F)`[1]), sig_df)
+      sig_df = sig_df %>% mutate(Significant = (P <= p_val))
+    } 
+  } else{
+    sig_df = NULL
+  }
+  
+  # plotting
+  if (plt_model){
+    # ‘wa’ plotting 
+    # weighted sums of env. variables
+    {
+      # scaling of scores
+      {
+        env_scores_sc_1 = scores(rda_model, choices=1:2, scaling = 1, display="sp")
+        env_scores_sc_2 = scores(rda_model, choices=1:2, scaling = 2, display="sp") 
+        
+        # these are just rescaled by a different factor (constant factor per RDA axis)
+        transl_env_rds[,1:2] / env_scores_sc_1
+        transl_env_rds[,1:2] / env_scores_sc_2
+      }
+      
+      # scaling 1 - distance biplot
+      # euclidic distances between objects, but
+      # only vectors of response variables (env. vars) and 
+      # explanatory variables (lc type) reflect linear correlation
+      # i.e. do not interpret correlation between env. variables
+      {
+        plot(rda_model, scaling=1, main="Triplot env. vars ~ lc - scaling 1 - wa scores")
+        arrows(0,0,env_scores_sc_1[,1], env_scores_sc_1[,2], length=0, lty=1, col='darkred')
+        text(x = env_scores_sc_1[,1], y = env_scores_sc_1[,2], labels = row.names(env_scores_sc_1),
+             col = "darkred")
+      }
+      
+      # scaling 2 - correlation biplot
+      # no euclidic distances  between objects, but
+      # all vectors reflect linear correlation
+      # and length of env. vars arrows reflext importance for RDA (species scores are scaled by eigenvalues)
+      {
+        plot(rda_model, main="Triplot env. vars ~ lc - scaling 2 - wa scores")
+        arrows(0,0,env_scores_sc_2[,1], env_scores_sc_2[,2], length=0, lty=1, col='darkred')
+        text(x = env_scores_sc_2[,1], y = env_scores_sc_2[,2], labels = row.names(env_scores_sc_2),
+             col = "darkred")
+      }
+    }
+  }
+  
+  return(list(rda_model = rda_model, 
+              R2_adj = R2_adj, 
+              transl_lc_rds = transl_lc_rds, 
+              vars_transf_rds_wa_sc_1 = vars_transf_rds_wa_sc_1,
+              variance_df = variance_df, significance_df = sig_df, 
+              pca_model = list(model = pca_model,
+                               rel_variances = pca_variance, 
+                               A = pca_A, 
+                               predicted = pca_pred)))
+}
+
+## ...
+##'
+##' 
+##' @title rdaModel
+##' @param 
+##' save_folder
+##' @return ...
+##' \item{\code{...}}{...: ...}
+##' @importFrom dplyr filter
+##' @export
+rdaModel = function(lc_env_rda, meta_cols, 
+                    significance_tests = F, p_val = 0.05,
+                    plt_model = F, width = 1200, height = 800,
+                    save_folder = NULL){
+  
+  env_cols = colnames(lc_env_rda %>% select(-any_of(c("Landcover", meta_cols))))
+  
+  lc_env_rda$Landcover = factor(lc_env_rda$Landcover,
+                                levels = sort(unique(lc_env_rda$Landcover)))
+  
+  # plot correlations among environmental data
+  {
+    cor_mat = cor(lc_env_rda[, env_cols]) 
+    
+    library(ggcorrplot)
+    plt = ggcorrplot(cor_mat,
+                     hc.order = F,
+                     type = "upper",
+                     lab = T, 
+                     colors = c("#6D9EC1", "white", "#E46726")) + 
+      labs(title = paste0("Correlation of Env. Variables for Site ", ID)) + 
+      theme_minimal()
+    plt
+  }  
+  
+  # z-standardization
+  {
+    means_per_var = apply(lc_env_rda %>% select(all_of(env_cols)), 2, mean)
+    sd_per_var = apply(lc_env_rda %>% select(all_of(env_cols)), 2, sd)
+    
+    lc_env_rda = cbind(lc_env_rda[, meta_cols],
+                       do.call(cbind,
+                               lapply(env_cols,
+                                      function(u){
+                                        (lc_env_rda[, u] - means_per_var[u]) / sd_per_var[u]
+                                      })),
+                       Landcover = lc_env_rda$Landcover)
+    colnames(lc_env_rda) = c(meta_cols, env_cols, "Landcover")
+    
+    # check
+    #round(apply(lc_env_rda %>% select(all_of(env_cols)), 2, mean, na.rm = T), 2)
+    #round(apply(lc_env_rda %>% select(all_of(env_cols)), 2, sd, na.rm = T), 2)
+  }
+  
+  # compute RDA model
+  rda_results = compute_rda(df = lc_env_rda,
+                            env_cols = env_cols,
+                            significance_tests = significance_tests,
+                            plt_model = plt_model,
+                            width = width, height = height)
+  
+  if (!is.null(save_folder)){
+    save(rda_results, file = file.path(save_folder, paste0("rdaModel_", unique(lc_env_rda$Dataset_ID), ".rda")))
+  } else{
+    return(rda_results)
+  }
+}
+
+
+## ...
+##'
+##' 
+##' @title plot_env_space
+##' @param 
+##' save_folder
+##' @return ...
+##' \item{\code{...}}{...: ...}
+##' @importFrom dplyr filter
+##' @export
+plot_env_space = function(df, class_defs, rda_model,
+                          variance_df = NULL, 
+                          sig_df = NULL, p_val = NULL,
+                          title = "Environmental Space", RDA1 = "RDA1", RDA2="RDA2",
+                          xlims = NULL, ylims = NULL){
+  
+  # rda results
+  {
+    coords = df %>% select("RDA1", "RDA2")
+    
+    model_prop_1 = as.numeric(variance_df %>% filter(Axis == "RDA1") %>% select(Relative_Variance)) * 100
+    model_prop_2 = as.numeric(variance_df %>% filter(Axis == "RDA2") %>% select(Relative_Variance)) * 100
+    model_prop_unit = "% of total variance"
+    constr_var = paste0(round(sum(eigenvals(rda_model, "constrained")) / 
+                              sum(eigenvals(rda_model, "all")) * 100, 1), 
+                        model_prop_unit)
+    unconstr_var = paste0(round(sum(eigenvals(rda_model, "unconstrained")) / 
+                                sum(eigenvals(rda_model, "all")) * 100, 1), 
+                          model_prop_unit)
+  }
+  
+  # class definitions for this site
+  {
+    class_defs_site = class_defs %>% filter(Class_Code %in% (df$Landcover))
+    
+    # these defintions are used for plotting etc. throughout the script
+    class_codes = class_defs_site$Class_Code
+    class_names = paste0("LC", class_codes)
+    class_labels = paste0("LC",class_defs_site$Class_Code, " ", 
+                          gsub(", ", ",\n", class_defs_site$Class_Plotlabel))
+    class_cols = class_defs_site$Color_Code
+  }
+  
+  # prepare plot frame
+  {
+    data = data.frame("x"=coords[["RDA1"]], "y"=coords[["RDA2"]],
+                      "Class"=df$Landcover, 
+                      stringsAsFactors = F)
+    data$Class = factor(data$Class, levels = class_codes)
+    n_samples = nrow(data)
+    rand_inds = sample(1:nrow(data),nrow(data))
+    data = data[rand_inds,]; row.names(data) = NULL
+
+    n_samples_per_class = sapply(levels(data$Class), 
+                                 function(u) length(which(data$Class == u)))
+    variances_pcs = variance_df[grep("PC", variance_df$Axis),]
+    variances_rds = variance_df[grep("RD", variance_df$Axis),]
+  }
+  
+  # plot
+  {
+    plt = ggplot(data, aes(x, y)) +
+      geom_point(aes(x, y, colour = Class), alpha=0.75,
+                 shape=20, size = 1.75) +
+      scale_color_manual(values=class_cols, labels = class_labels) +
+      labs(x = paste0(gsub("_"," ","RDA1"), " (", 
+                      round(model_prop_1,2), model_prop_unit,")", sep=""),
+           y = paste0(gsub("_"," ","RDA2"), " (", 
+                      round(model_prop_2,2),  model_prop_unit,")", sep=""),
+           title=title) + 
+      labs(subtitle = paste0("\nNr. of samples for model building: ", n_samples, "\n",
+                             "Percentage of samples per class:\n\t", 
+                             paste0("LC", names(n_samples_per_class), " ",
+                                    paste0(round(n_samples_per_class / n_samples * 100, 1), "%"),
+                                    collapse = " | "), "\n",
+                             "\nConstrained Variance: ", constr_var, "\n",
+                             "R^2 and adjusted R^2 from Multivariate Regression: ", 
+                             round(sum(variances_rds$Variance) / sum(variance_df$Variance), 4), " ",  
+                             round(rda_R2_adj, 4), "\n",
+                             "Variance per environmental axis:\n\t", 
+                             paste0(variances_rds$Axis, " ", 
+                                    round(variances_rds$Relative_Variance*100, 2), "%", collapse = " | "), "\n","\nUnconstrained Variance: ", unconstr_var, "\n",
+                             "Variance per unconstrained axis:\n\t", 
+                             paste0(variances_pcs$Axis, " ", 
+                                    round(variances_pcs$Relative_Variance*100, 2), "%",
+                                    collapse = " | "), "\n",
+                             c("", paste0(
+                                 paste0("\nSignificance: p <= ", p_val),
+                                 paste0("\nModel Significance: ", sig_df$P[which(sig_df$Axes == "Model")],
+                                        c("", " (sig)")[as.numeric(sig_df$P[which(sig_df$Axes == "Model")] <= p_val) + 1]),
+                                 paste0("\nConstraining Variables Significance:"),
+                                 paste0("\n\t",paste0(sig_df[grep("LC", sig_df$Axes), "Axes"]," ",
+                                                      sig_df[grep("LC", sig_df$Axes), "P"], 
+                                                      c("", " (sig)")[as.numeric(sig_df[grep("LC", sig_df$Axes),
+                                                                                        "Significant"]) + 1], 
+                                                      collapse = " | ")),
+                                 paste0("\nEnvironmental Axes Significance:"), 
+                                 paste0("\n\t", paste0(sig_df[grep("RD", sig_df$Axes), "Axes"]," ",
+                                                       sig_df[grep("RD", sig_df$Axes), "P"], 
+                                                       c("", " (sig)")[as.numeric(sig_df[grep("RD", sig_df$Axes), 
+                                                                                         "Significant"]) + 1],
+                                                       collapse = " | ")))
+                               )[as.integer(!is.null(sig_df))+1]
+                             ),
+           colour = "Land Cover\nType") +
+      theme_minimal() +     
+      theme(legend.title = element_text(size=16), #change legend title font size
+            legend.text = element_text(size=14), #change legend text font size
+            axis.text = element_text(size = 14),
+            axis.title = element_text(size = 16),
+            plot.title = element_text(size = 18),
+            plot.subtitle = element_text(size = 12)) +
+      guides(colour = guide_legend(override.aes = list(alpha = 1, size=4))) +
+      list(
+        if (!is.null(xlims)){
+          suppressMessages(xlim(xlims))
+        },
+        if (!is.null(ylims)){
+          suppressMessages(ylim(ylims))
+        }
+      )
+    
+    return(plt)
+  }
+}
+
 # ////////////////////////////////
 # helper functions (not exported)
 
