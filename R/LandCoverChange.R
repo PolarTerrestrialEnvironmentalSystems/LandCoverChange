@@ -1444,7 +1444,7 @@ vegLcModel = function(veg_modern, meta_cols_veg,
             geom_ribbon(aes(x = n_pred, ymin = lower_mae, ymax = upper_mae, fill = Dataset), alpha = 0.4) +
             scale_x_continuous(breaks = c(2, seq(0,100,2))) + 
             scale_color_manual(values=c("indianred", "steelblue")) +
-            theme_plot + 
+            theme_minimal() + 
             labs(x = "Nr. of predictors included in mulitvariate regression model ( )",
                  y = "Mean absolute error ( )",
                  title = "Model Evaluation on Training and Validation Set",
@@ -1857,6 +1857,9 @@ predictLC = function(model, veg_predictors, meta_cols, lc_modern,
 ##' @export
 extractDataPSA = function(poly, landcover, elevation, climate,
                           save_folder, del_classes = NULL){
+  
+  ID = poly$Dataset_ID
+  
   # check if the pollen source area crosses the date line
   lons = as.data.frame(st_coordinates(poly))$X
   if (sign(min(lons)) != sign(max(lons))){
@@ -2411,6 +2414,781 @@ plot_env_space = function(df, class_defs, rda_model,
     return(plt)
   }
 }
+
+
+## ...
+##'
+##' 
+##' @title density_overlap_2D
+##' @param 
+##' save_folder
+##' @return ...
+##' \item{\code{...}}{...: ...}
+##' @importFrom dplyr filter
+##' @export
+density_overlap_2D = function(scores_1, scores_2, 
+                              name_1, name_2,
+                              n_env_cells_per_dim = 100,
+                              xlims, ylims,
+                              plt_densities = F){
+  library(MASS)
+  library(dplyr); select = dplyr::select
+  
+  scores_1_in = scores_1; scores_2_in = scores_2
+  scores_1 = scores_1 %>% select(x, y)
+  scores_2 = scores_2 %>% select(x, y)
+  
+  # compute density estimates with gaussian bivariate kernel
+  {
+    dens_1 = kde2d(x = scores_1[, 1], y = scores_1[, 2], 
+                   h = apply(scores_1, 2, bandwidth.nrd), 
+                   n = n_env_cells_per_dim,
+                   lims = c(xlims, ylims))
+    
+    dens_2 = kde2d(x = scores_2[, 1], y = scores_2[, 2], 
+                   h = apply(scores_2, 2, bandwidth.nrd), 
+                   n = n_env_cells_per_dim,
+                   lims = c(xlims, ylims))
+    
+    x = dens_1$x; y = dens_1$y
+    z1 = as.vector(t(dens_1$z)); z2 = as.vector(t(dens_2$z))
+    
+    coords_1 = cbind(as.data.frame(expand_grid(x = x, y = y)), 
+                     z = as.vector(z1))
+    coords_2 = cbind(as.data.frame(expand_grid(x = x, y = y)), 
+                     z = as.vector(z2))
+    
+    # remove infinitesimal values resulting from kernel smoothing
+    {
+      #coords_1$z[coords_1$z < (max(coords_1$z, na.rm = T) / 1000)] = 0 
+      #coords_2$z[coords_2$z < (max(coords_2$z, na.rm = T) / 1000)] = 0 
+    }
+    
+    # remove infinite values and NAs
+    {
+      coords_1$z[is.na(coords_1$z) | (is.infinite(coords_1$z))] = 0
+      coords_2$z[is.na(coords_2$z) | (is.infinite(coords_2$z))] = 0
+    }
+  }           
+  
+  # make raster version to return
+  {
+    dens_1_norm = dens_1
+    dens_1_norm$z = dens_1_norm$z / sum(dens_1_norm$z)
+    dens_1_raster = raster::raster(dens_1_norm)
+    
+    dens_2_norm = dens_2
+    dens_2_norm$z = dens_2_norm$z / sum(dens_2_norm$z)
+    dens_2_raster = raster::raster(dens_2_norm)
+  }
+  
+  if (!(all(round(coords_1$z, 6) == 0) & 
+        all(round(coords_2$z, 6) == 0))){
+    
+    # plot the env. space and the two subspaces
+    {
+      if (plt_densities){
+        # lc 1
+        {
+          image(dens_1_norm, 
+                main = paste0("Normalized denisity for ",
+                              name_1))
+          contour(dens_1_norm, add = T)
+          
+          # plot the original scores to verify the correct position
+          # scores_1_sf = st_as_sf(scores_1, coords = c(1,2))
+          # plot(scores_1_sf, add = T, col = "red", cex = 0.1, pch = 16)
+          # 
+          # just to check that the matrix entries really match the coordinates
+          # coords_1_sf = st_as_sf(coords_1[which(coords_1$z != 0), ], coords = c(1,2))
+          # plot(coords_1_sf, add = T, col = "grey50", cex = 0.1, pch = 16)
+        }
+        
+        # lc 2
+        {
+          dens_2_norm = dens_2
+          dens_2_norm$z = dens_2_norm$z / sum(dens_2_norm$z)
+          
+          image(dens_2_norm, 
+                main = paste0("Normalized denisity for ",
+                              name_2))
+          contour(dens_2_norm, add = T)
+          
+          # plot the original scores to verify the correct position
+          #scores_2_sf = st_as_sf(scores_2, coords = c(1,2)) %>% st_set_crs(4326)
+          #plot(scores_2_sf, add = T, col = "darkgreen", cex = 0.1, pch = 16)
+          
+          # just to check that the matrix entries really match the coordinates
+          #coords_2_sf = st_as_sf(coords_2[which(coords_2$z != 0), ], coords = c(1,2))
+          #plot(coords_2_sf, add = T, col = "grey50", cex = 0.1, pch = 16)                        
+        }
+      }
+    }
+    
+    # compute density overlap
+    {
+      # rescale by the sum, i.e. make the density 2-point-probability
+      coords_1$z = coords_1$z / sum(coords_1$z)
+      coords_2$z = coords_2$z / sum(coords_2$z)
+      
+      D = 1 - (0.5 * (sum(abs(coords_1$z - coords_2$z))))			
+      I = 1 - (0.5 * (sqrt(sum((sqrt(coords_1$z) - sqrt(coords_2$z))**2))))
+    }
+  } else{
+    cat("\n\tAll density values for classes", name_1, "and", name_2, " are 0.")
+    D = NA
+    I = NA
+  }
+  
+  return(list(x = x, y = y, 
+              scores_1 = scores_1, scores_2 = scores_2,
+              dens_1_raster = dens_1_raster, dens_2_raster = dens_2_raster,
+              coords_1 = coords_1, coords_2 = coords_2,
+              overlap_D = D, overlap_I = I))
+}
+
+## ...
+##'
+##' 
+##' @title plot_distances
+##' @param 
+##' save_folder
+##' @return ...
+##' \item{\code{...}}{...: ...}
+##' @importFrom dplyr filter
+##' @export
+plot_distances = function(distance_matrix, 
+                          classes, class_colors,
+                          save_folder=NULL,
+                          width=1200, height=800,
+                          scale_to_max = T){
+  
+  library(ggtext)
+  
+  if (length(grep("LC", colnames(distance_matrix))) == 0){
+    colnames(distance_matrix) = paste0("LC", colnames(distance_matrix))
+    row.names(distance_matrix) = paste0("LC", row.names(distance_matrix))
+  }
+  if (length(grep("LC", classes)) == 0){
+    classes = paste0("LC", classes)
+  }
+  
+  distance_matrix = as.data.frame(distance_matrix)
+  
+  distance_matrix$Class_2 = row.names(distance_matrix)
+  row.names(distance_matrix) = NULL
+  
+  dist_table = distance_matrix %>% 
+    pivot_longer(cols = starts_with("LC"), names_to = "Class_1")
+  colnames(dist_table)[3] = "Distance"
+  
+  dist_table$Class_1 = factor(dist_table$Class_1, levels=rev(classes))
+  dist_table$Class_2 = factor(dist_table$Class_2, levels=rev(classes))
+  
+  # scale to max for plotting
+  if (scale_to_max){ dist_table$Distance = dist_table$Distance / max(dist_table$Distance, na.rm=T) }
+  
+  plt = ggplot(dist_table, aes(Class_1, Class_2)) + 
+    labs(fill="Distance", 
+         x="Land cover type", y="Land cover type") + 
+    geom_tile(aes(fill = Distance)) + 
+    scale_fill_gradient(low="white", high="grey30") +
+    geom_text(aes(label = round(Distance,2)), 
+              color="indianred3", size=4.5,
+              fontface="bold"
+    ) +
+    theme_minimal() + 
+    theme(axis.text.x = element_markdown(angle = 45, hjust = 1,
+                                         #fill = rev(class_colors),
+                                         #color="white",
+                                         size=14,
+                                         #face="bold"
+    ),
+    axis.text.y = element_markdown(angle = 0, hjust = 1,
+                                   #fill= rev(class_colors),
+                                   #color="white",
+                                   size=14,
+                                   #face="bold"
+    ),
+    legend.title = element_text(size=16), 
+    legend.text = element_text(size=14),
+    axis.title = element_text(size = 16),
+    plot.title = element_text(size = 18),
+    plot.subtitle = element_text(size = 16),
+    panel.grid.major = element_line(size = 0.5,
+                                    color = "grey20"),
+    panel.grid.minor = element_line(size = 0.5,
+                                    linetype = 1))
+  
+  if (!is.null(save_folder)){
+    png(save_folder, width=width, height=height)
+    print(plt)
+    dev.off()
+  } else {
+    return(plt)
+  }
+}
+
+## ...
+##'
+##' 
+##' @title distancesAndOverlaps
+##' @param 
+##' save_folder
+##' @return ...
+##' \item{\code{...}}{...: ...}
+##' @importFrom dplyr filter
+##' @export
+distancesAndOverlaps = function(ID, env_df, class_defs,
+                                overlap_metric = "D", n_env_cells_per_dim = 100,
+                                plot_niches = F, plot_overlap = F, plot_dists = F, width = 1200, height = 800,
+                                save_folder = NULL,
+                                verb = 0){
+  
+  return_list = list()
+  
+  # find min / max boundaries of all landcover classes in x (=RDA1) and y (=RDA2) direction
+  # such that the density estimation fuction that is applied per class has information on how to extend the densities to the env. space of all classes
+  {
+    coords = env_df %>% select("RDA1", "RDA2")
+    xlims = c(min(coords[,1]), max(coords[, 1]))
+    ylims = c(min(coords[,2]), max(coords[, 2]))
+  }
+  
+  # class definitions for this site
+  {
+    class_defs_site = class_defs %>% filter(Class_Code %in% (env_df$Landcover))
+    
+    # these defintions are used for plotting etc. throughout the script
+    class_codes = class_defs_site$Class_Code
+    class_names = paste0("LC", class_codes)
+    class_labels = paste0("LC",class_defs_site$Class_Code, " ", 
+                          gsub(", ", ",\n", class_defs_site$Class_Plotlabel))
+    class_cols = class_defs_site$Color_Code
+  }
+  
+  # compute overlap per unique pair of land cover classes
+  {
+    per_pair = list()
+    
+    # all combination of landcover classes
+    {
+      # das kann sicherlich einfacher machen, aber ich wusste nicht wie. Ziel ist es einfach alle Kombinationen der landcover cover Klassen bilden
+      # ohne die wo lc1 == lc2 und ohne die Vertauschungen von Kombinationen (als lc2, lc1 nicht aufnehmen, wenn lc1, lc2 schon drin ist)
+      pairs = as.data.frame(expand_grid(class_codes, class_codes))
+      colnames(pairs) = c("lc1", "lc2")
+      pairs = pairs %>% filter(lc1 != lc2)
+      pairs_new = data.frame(lc1 = 1, lc2 = 1)
+      for (class1 in unique(pairs$lc1)){
+        for (class2 in unique(pairs$lc2)){
+          if (nrow(pairs_new %>% filter((lc2 == class1) & (lc1 == class2))) == 0){
+            pairs_new = rbind(pairs_new, data.frame(lc1 = class1, lc2 = class2))
+          }
+        }
+      }
+      pairs = pairs_new[-1,]; pairs = pairs %>% filter(lc1 != lc2); row.names(pairs) = NULL
+      
+      per_pair[["pairs"]] = pairs
+    }
+    
+    # compute niches and overlaps per pair of land cover classes
+    {
+      
+      if(verb >0){ cat("\n\tCompute density in env. space (niche) per class:") }
+      
+      per_pair$results = list()
+      for (ind in 1:nrow(pairs)){
+        
+        # prepare pair's results list
+        {
+          class1 = pairs$lc1[ind]; class2 = pairs$lc2[ind]
+          per_pair$results[[ind]] = list()
+          per_pair$results[[ind]]$pair = pairs[ind,]
+          if(verb >0){ cat("\n\t\tPair: ", paste0(class1, " - ", class2)) }
+        }
+        
+        # extract scores
+        {
+          scores_1 = env_df[env_df$Landcover == class1, c("cell_ind", "RDA1", "RDA2", "Landcover")]
+          scores_2 = env_df[env_df$Landcover == class2, c("cell_ind", "RDA1", "RDA2", "Landcover")]
+          
+          scores_1_coords = env_df[env_df$Landcover == class1, c("cell_ind", "x", "y", "Landcover")]
+          scores_2_coords = env_df[env_df$Landcover == class2, c("cell_ind", "x", "y", "Landcover")]
+          scores_coords = rbind(scores_1_coords, scores_2_coords)
+        }
+        
+        # compute niches and overlap
+        {
+          overlap_obj = density_overlap_2D(scores_1 =  scores_1 %>% rename(x = RDA1, y = RDA2), 
+                                           scores_2 = scores_2 %>% rename(x = RDA1, y = RDA2),
+                                           name_1 = paste0("LC", class1), 
+                                           name_2 = paste0("LC", class2),
+                                           n_env_cells_per_dim = n_env_cells_per_dim,
+                                           xlims = xlims, ylims = ylims,
+                                           plt_densities = F # this gives a plot of the densities of each class too, but later there will be better plots
+          )
+          per_pair$results[[ind]]$overlap_obj = overlap_obj
+          
+          x = overlap_obj$x; y = overlap_obj$y
+          dens_1 = cbind(overlap_obj$coords_1, Landcover = class1)
+          dens_2 = cbind(overlap_obj$coords_2, Landcover = class2)
+          
+          dens_1_raster = overlap_obj$dens_1_raster
+          dens_2_raster = overlap_obj$dens_2_raster
+          
+          per_pair$results[[ind]]$dens_1_raster = dens_1_raster
+          per_pair$results[[ind]]$dens_2_raster = dens_2_raster
+        }
+        
+        # niches data frame and density estimation
+        {
+          niches_df = rbind(dens_1, dens_2)
+          niches_df$Landcover = factor(niches_df$Landcover, levels = sort(unique(niches_df$Landcover)))
+          
+          scores = rbind(scores_1, scores_2)
+          scores = suppressMessages(left_join(scores, scores_coords))
+          scores$Landcover = factor(scores$Landcover, levels = sort(unique(niches_df$Landcover)))
+          
+          per_pair$results[[ind]]$niches = niches_df
+          per_pair$results[[ind]]$scores = scores
+        }
+        
+        # overlap, i.e. where to sample the switching cells from = overlap regions in env. space
+        {
+          overlap_df = data.frame(x = dens_1$x, y = dens_1$y,
+                                  z = (dens_1$z * dens_2$z))
+          
+          # remove infinitesimal values
+          #overlap_df$z[overlap_df$z <= max(overlap_df$z)/1000] = 0
+          
+          # renormalize overlap density to 1
+          overlap_df$z = overlap_df$z / sum(overlap_df$z)
+          
+          # replace NA with zero
+          overlap_df$z[which(is.na(overlap_df$z))] = 0
+          
+          per_pair$results[[ind]]$overlap_df = overlap_df
+        }
+        
+        # overlap as raster
+        {
+          # is identical to what happens in the next step (overlap_grid_raster)
+          # overlap_raster = dens_1_raster * dens_2_raster
+          # overlap_raster = overlap_raster / raster::cellStats(overlap_raster, stat = "sum")
+          # 
+          # per_pair$results[[ind]]$overlap_raster = overlap_raster
+          
+        }
+        
+        # match RDA scores and cells on the gridded env. space to plot the overlap on the map
+        # e.g. for connecting the density or joint densities in gridded env. space with spatial cooridnates on a map
+        # and to later sample points in env. space that switch landcover classes in part 3
+        {
+          # create grid matrix with overlap density values of the full environmental space
+          {
+            overlap_grid_matrix = list(x = unique(overlap_df$x),
+                                       y = unique(overlap_df$y),
+                                       z = matrix(overlap_df$z, nrow = length(unique(overlap_df$y)), 
+                                                  ncol = length(unique(overlap_df$x)), byrow = T))
+            overlap_grid_raster = raster::raster(overlap_grid_matrix)
+            
+            per_pair$results[[ind]]$overlap_grid_matrix = overlap_grid_matrix
+            per_pair$results[[ind]]$overlap_grid_raster = overlap_grid_raster
+            
+          }
+        }
+      }
+    }
+    
+    return_list[["per_pair"]] = per_pair
+  }
+  
+  # extract results (niches and overlap) from different pairs and bind together
+  {
+    if(verb >0){ cat("\n\n\tExtract data from all pairs.") }
+    return_list[["all_pairs"]] = list() 
+    return_list$all_pairs[["Pairs"]] = pairs
+    
+    dens_rasters = lapply(return_list$per_pair$results, 
+                          function(u){
+                            list(lc1 = u$pair$lc1,
+                                 lc2 = u$pair$lc2,
+                                 dens_1_raster = u$dens_1_raster,
+                                 dens_2_raster = u$dens_2_raster
+                            )
+                          })
+    return_list$all_pairs[["dens_rasters"]] = dens_rasters
+    
+    niches_df = do.call(rbind, 
+                        lapply(return_list$per_pair$results, 
+                               function(u){
+                                 cbind(u$niches,
+                                       lc1 = u$pair$lc1,
+                                       lc2 = u$pair$lc2,
+                                       D = u$overlap_obj$overlap_D,
+                                       I = u$overlap_obj$overlap_I)
+                               }))
+    niches_df = niches_df %>% mutate(Pair = paste0("LC", lc1, " - LC", lc2))
+    return_list$all_pairs[["niches_df"]] = niches_df
+    
+    scores = do.call(rbind, 
+                     lapply(return_list$per_pair$results, 
+                            function(u){
+                              cbind(u$scores,
+                                    lc1 = u$pair$lc1,
+                                    lc2 = u$pair$lc2,
+                                    D = u$overlap_obj$overlap_D,
+                                    I = u$overlap_obj$overlap_I)
+                            }))
+    scores = scores %>% mutate(Pair = paste0("LC", lc1, " - LC", lc2))
+    return_list$all_pairs[["scores_df"]] = scores
+    
+    overlap_df = do.call(rbind, 
+                         lapply(return_list$per_pair$results, 
+                                function(u){
+                                  cbind(u$overlap_df,
+                                        lc1 = u$pair$lc1,
+                                        lc2 = u$pair$lc2,
+                                        D = u$overlap_obj$overlap_D,
+                                        I = u$overlap_obj$overlap_I)
+                                }))
+    overlap_df = overlap_df %>% mutate(Pair = paste0("LC", lc1, " - LC", lc2))
+    return_list$all_pairs[["overlap_df"]] = overlap_df
+    
+    overlap_grid_matrix = lapply(return_list$per_pair$results,
+                                 function(u){
+                                   ret_list = u$overlap_grid_matrix
+                                 })
+    return_list$all_pairs[["overlap_grid_matrix"]] = overlap_grid_matrix
+    
+    overlap_grid_raster = lapply(return_list$per_pair$results,
+                                 function(u){
+                                   ret_list = u$overlap_grid_raster
+                                 })
+    return_list$all_pairs[["overlap_grid_raster"]] = overlap_grid_raster
+    
+    
+    Is = do.call(rbind, 
+                 lapply(return_list$per_pair$results, 
+                        function(u){ u$overlap_obj$overlap_I }))
+    return_list$all_pairs[["Overlap_metrics_I"]] = Is
+    
+    Ds = do.call(rbind, 
+                 lapply(return_list$per_pair$results, 
+                        function(u){ u$overlap_obj$overlap_D }))
+    return_list$all_pairs[["Overlap_metrics_D"]] = Ds
+  }
+  
+  # create distance matrix from overlap metrics per pair
+  {
+    if(verb >0){ cat("\n\n\tCreate Distance matrix.") }
+    return_list$distance_matrix = list()
+    
+    dist_mat = matrix(nrow = length(class_codes), ncol = length(class_codes))
+    colnames(dist_mat) = row.names(dist_mat) = class_codes
+    for (ind in 1:length(return_list$per_pair$results)){
+      class1 = as.character(return_list$per_pair$results[[ind]]$pair$lc1)
+      class2 = as.character(return_list$per_pair$results[[ind]]$pair$lc2)
+      
+      # what gets minimized in the optimal transport problem is the product of probability mass, p,  and distance, d.
+      # extreme examples:
+      # 1. no overlap in env. space means D = 0 (= 0% area overlapping), thus the distance to move the probability mass (share of class A) = d = 1, max distance as max dissimilar classes. 
+      # 2. shortest distance possible is a flow class A -> class A (actually no "flow", cells do not change landcover type and stay within their class) 
+      #    and this means max similarity -> minimal distance. i.e. dist matrix entry d must be zero 0 (where overlap D is 100% = 1).
+      if (overlap_metric == "D"){
+        dist_mat[class1, class2] = dist_mat[class2, class1] = 1 - return_list$per_pair$results[[ind]]$overlap_obj$overlap_D   
+      } else if (overlap_metric == "I"){
+        dist_mat[class1, class2] = dist_mat[class2, class1] = 1 - return_list$per_pair$results[[ind]]$overlap_obj$overlap_I   
+      }
+      
+    }
+    
+    # each class has d=0 distance, i.e. 100% similarity to itself (D = 1)
+    diag(dist_mat) = 0
+    
+    # normalize the distance matrix by the highest value, such that all sites have distances between 0 and 1
+    dist_mat_norm = dist_mat / max(dist_mat, na.rm = T)
+    
+    return_list$distance_matrix[["dist_mat_orig"]] = dist_mat
+    return_list$distance_matrix[["dist_mat_norm"]] = dist_mat_norm
+  }
+  
+  library(metR)
+  
+  if (plot_dists){
+    
+    if(verb >0){ cat("\n\n\tPlot distance matrix.") }
+    if (!is.null(save_folder)){
+      plt_dists = plot_distances(distance_matrix = as.data.frame(dist_mat_norm),
+                                 classes = class_codes, 
+                                 class_colors = class_cols,
+                                 save_folder = file.path(save_folder, paste0("distance_matrix_site_", ID, ".png")),
+                                 width = width, height = height,
+                                 scale_to_max = T)
+    } else {
+      plot_distances(distance_matrix = as.data.frame(dist_mat_norm),
+                     classes = class_codes, 
+                     class_colors = class_cols,
+                     save_folder = NULL,
+                     width = width, height = height,
+                     scale_to_max = T)
+    }
+    
+  }
+  
+  if (plot_niches){
+    
+    cat("\n\n\tPlot niches per Pair:")
+    niches_df$Landcover = as.numeric(as.character(niches_df$Landcover))
+    
+    for (ind in 1:nrow(pairs)){
+      class1 = pairs[ind, 1]; class2 = pairs[ind, 2]
+      class_defs_pair = class_defs_site[which(class_defs_site$Class_Code %in% c(class1, class2)),]
+      if(verb >0){  cat("\n\t\tPair:", paste0(class1, " - ", class2)) }
+      
+      # plot niches seperately as raster
+      {
+        them = theme(plot.title = element_text(size = 20),
+                     plot.subtitle = element_text(size=18),
+                     legend.position="right",
+                     legend.title = element_text(size=16),
+                     legend.text = element_text(size=16),
+                     legend.key.size = unit(1,"cm"),
+                     axis.text = element_text(size = 16),
+                     axis.title = element_text(size = 18),
+                     strip.text.x = element_text(size = 16, color = "grey20", face = "bold"),
+                     strip.background = element_rect(fill="white"))
+        # with points
+        plt_1 = ggplot() +
+          geom_raster(data = raster::as.data.frame(dens_rasters[[ind]]$dens_1_raster, 
+                                                   xy = T), 
+                      aes(x = x, y = y, fill = layer)) + 
+          scale_fill_gradient(low = "white", high = class_defs_pair$Color_Code[1]) + 
+          coord_fixed() + 
+          theme_minimal() + 
+          labs(title = paste0("Site", ID, " - Density of Class LC", class1),
+               fill = "Density") +
+          them
+        
+        
+        plt_2 = ggplot() +
+          geom_raster(data = raster::as.data.frame(dens_rasters[[ind]]$dens_2_raster, 
+                                                   xy = T), 
+                      aes(x = x, y = y, fill = layer)) + 
+          scale_fill_gradient(low = "white", high = class_defs_pair$Color_Code[2]) + 
+          coord_fixed() + 
+          theme_minimal() + 
+          labs(title = paste0("Site", ID, " - Density of Class LC", class2),
+               fill = "Density") + 
+          them
+        
+        # with points added
+        plot_df_scores = scores %>% filter((lc1 == class1) & (lc2 == class2)) %>% 
+          left_join(env_df %>% select(any_of(c("cell_ind", "Origin_Landcover"))), by = "cell_ind")
+        plot_df_scores$Origin_Landcover = factor(plot_df_scores$Origin_Landcover, 
+                                                 levels = c("Within PSA",
+                                                            "Outside PSA"))
+        plt_3 = ggplot() +
+          geom_raster(data = raster::as.data.frame(dens_rasters[[ind]]$dens_1_raster, 
+                                                   xy = T), 
+                      aes(x = x, y = y, fill = layer)) + 
+          scale_fill_gradient(low = "white", high = class_defs_pair$Color_Code[1]) + 
+          geom_point(data = plot_df_scores %>% filter(Landcover == class1), 
+                     mapping = aes(x = RDA1, y = RDA2, colour = Origin_Landcover),
+                     size = 1.25, alpha = 0.3) + 
+          coord_fixed() + 
+          theme_minimal() + 
+          labs(title = paste0("Site", ID, " - Density of Class LC", class1),
+               fill = "Density",
+               Colour = "Origin of Landcover Cell") +
+          guides(colour = guide_legend(override.aes = list(alpha = 1, size=4))) +
+          them
+        
+        plt_4 = ggplot() +
+          geom_raster(data = raster::as.data.frame(dens_rasters[[ind]]$dens_2_raster, 
+                                                   xy = T), 
+                      aes(x = x, y = y, fill = layer)) + 
+          scale_fill_gradient(low = "white", high = class_defs_pair$Color_Code[2]) + 
+          geom_point(data = plot_df_scores %>% filter(Landcover == class2), 
+                     mapping = aes(x = RDA1, y = RDA2, colour = Origin_Landcover),
+                     size = 1.25, alpha = 0.3) + 
+          coord_fixed() + 
+          theme_minimal() + 
+          labs(title = paste0("Site", ID, " - Density of Class LC", class2),
+               fill = "Density",
+               Colour = "Origin of Landcover Cell") +
+          guides(colour = guide_legend(override.aes = list(alpha = 1, size=4))) +
+          them
+        
+        if (!is.null(save_folder)){
+          png(filename = file.path(save_folder, "niches",
+                                   paste0("niches_classes_", class1, "_", class2, "_site_", ID, ".png")), 
+              width = 2*width, height = 2*height)
+          gridExtra::grid.arrange(plt_1, plt_2, plt_3, plt_4, nrow = 2)
+          dev.off()
+        } else{
+          gridExtra::grid.arrange(plt_1, plt_2, plt_3, plt_4, nrow = 2)
+        }
+      }
+    }
+  }
+  
+  if (plot_overlap){
+    
+    if(verb >0){ cat("\n\n\tPlot niche overlap per Pair:") }
+    
+    # plot overlap in gridded env. space as raster
+    for (ind in 1:nrow(pairs)){
+      class1 = pairs[ind, 1]; class2 = pairs[ind, 2]
+      class_defs_pair = class_defs_site[which(class_defs_site$Class_Code %in% c(class1, class2)),]
+      if(verb >0){ cat("\n\t\tPair:", paste0(class1, " - ", class2)) }
+      
+      plot_df_scores = scores %>% filter((lc1 == class1) & (lc2 == class2)) %>% 
+        left_join(env_df %>% select(any_of(c("cell_ind", "Origin_Landcover"))), by = "cell_ind")
+      plot_df_scores$Origin_Landcover = factor(plot_df_scores$Origin_Landcover, 
+                                               levels = c("Within PSA",
+                                                          "Outside PSA"))
+      plot_df_scores$Landcover = factor(plot_df_scores$Landcover,
+                                        levels = sort(unique(plot_df_scores$Landcover)))
+      plot_df = overlap_df %>% filter((lc1 == class1) & (lc2 == class2)) 
+      
+      them =  theme(plot.title = element_text(size = 20),
+                    plot.subtitle = element_text(size=18),
+                    legend.position="right",
+                    legend.title = element_text(size=16),
+                    legend.text = element_text(size=16),
+                    legend.key.size = unit(1,"cm"),
+                    axis.text = element_text(size = 16),
+                    axis.title = element_text(size = 18),
+                    strip.text.x = element_text(size = 16, color = "grey20", face = "bold"),
+                    strip.background = element_rect(fill="white"))
+      
+      # without points
+      plt_1 = ggplot() +
+        geom_raster(data = raster::as.data.frame(overlap_grid_raster[[ind]], xy = T), 
+                    aes(x = x, y = y, fill = layer)) + 
+        geom_point(data = plot_df, aes(x = x, y = y),
+                   size = 0.5, colour = "grey60", alpha = 0.3) +
+        scale_fill_gradient(low = "white", high = "darkred") + 
+        coord_fixed() +  
+        theme_minimal() + 
+        labs(title = paste0("Site", ID, " - Overlap of Classes LC", class1, " and LC", class2),
+             subtitle = paste0("Overlap, D = ", round(Ds[ind], 4)),
+             fill = "Density") +
+        them +
+        guides(colour = guide_legend(override.aes = list(alpha = 1, size=4)))
+      
+      # with points of class1
+      plt_2 = ggplot() +
+        geom_raster(data = raster::as.data.frame(overlap_grid_raster[[ind]], xy = T), 
+                    aes(x = x, y = y, fill = layer)) + 
+        geom_point(data = plot_df, aes(x = x, y = y),
+                   size = 0.5, colour = "grey60", alpha = 0.3) +
+        scale_fill_gradient(low = "white", high = "darkred") + 
+        geom_point(data = plot_df_scores %>% filter(Landcover == class1), 
+                   mapping = aes(x = RDA1, y = RDA2, colour = Origin_Landcover),
+                   size = 1.25, alpha = 0.5) + 
+        coord_fixed() +  
+        theme_minimal() + 
+        labs(title = paste0("Site", ID, " - Overlap of Classes LC", class1, " and LC", class2,
+                            "\nwith points of LC", class1),
+             subtitle = paste0("Overlap, D = ", round(Ds[ind], 4)),
+             fill = "Density") +
+        them +
+        guides(colour = guide_legend(override.aes = list(alpha = 1, size=4)),
+               fill = guide_legend(override.aes = list(alpha = 1, size=4)))
+      
+      # with points of class2
+      plt_3 = ggplot() +
+        geom_raster(data = raster::as.data.frame(overlap_grid_raster[[ind]], xy = T), 
+                    aes(x = x, y = y, fill = layer)) + 
+        geom_point(data = plot_df, aes(x = x, y = y),
+                   size = 0.5, colour = "grey60", alpha = 0.3) +
+        scale_fill_gradient(low = "white", high = "darkred") + 
+        geom_point(data = plot_df_scores %>% filter(Landcover == class2), 
+                   mapping = aes(x = RDA1, y = RDA2, colour = Origin_Landcover),
+                   size = 1.25, alpha = 0.5) + 
+        coord_fixed() +  
+        theme_minimal() + 
+        labs(title = paste0("Site", ID, " - Overlap of Classes LC", class1, " and LC", class2,
+                            "\nwith points of LC", class2),
+             subtitle = paste0("Overlap, D = ", round(Ds[ind], 4)),
+             fill = "Density") +
+        them +
+        guides(colour = guide_legend(override.aes = list(alpha = 1, size=4)),
+               fill = guide_legend(override.aes = list(alpha = 1, size=4)))
+      
+      if (!is.null(save_folder)){
+        png(filename = file.path(save_folder, "overlap",
+                                 paste0("overlap_classes_", class1, "_", class2, "_site_", ID, ".png")), 
+            width = 2*width, height = 2*height)
+        gridExtra::grid.arrange(plt_1, plt_2, plt_3, nrow = 3)
+        dev.off()
+      } else{
+        gridExtra::grid.arrange(plt_1, plt_2, plt_3, nrow = 3)
+      }
+      
+    }
+  }
+  
+  if (!is.null(save_folder)){
+    save(return_list, file = file.path(save_folder, "distancesAndOverlaps.rda"))
+  } else{
+    return(return_list)
+  }
+}
+
+
+
+## ...
+##'
+##' 
+##' @title regGrid
+##' @param 
+##' save_folder
+##' @return ...
+##' \item{\code{...}}{...: ...}
+##' @importFrom dplyr filter
+##' @export
+regGrid = function(map, cell_length, 
+                   plot_folder = NULL, width = 1200, height = 800){
+  
+  library(sf); sf_use_s2(F)
+  library(stars)
+  
+  # land and water cells as polygons
+  grid_polys = st_as_sf(st_as_stars(map, dx = cell_length, dy = cell_length))
+  grid_polys$cell_ind = 1:nrow(grid_polys)
+  
+  # land and water cells as points
+  grid_points = suppressWarnings(st_centroid(grid_polys))
+  
+  # land cells as points
+  grid_points_land = grid_points %>% filter(values == 1) %>% select(-values)
+  
+  # land cells as polygons
+  grid_polys_land = grid_polys %>% filter(values == 1) %>% select(-values)
+  
+  # plot water and land cells, only for land cells the land cover will extracted
+  if (!is.null(plot_folder) & (nrow(grid_polys) <= 10**5)){ 
+    png(file.path(plot_folder, "water_land_mask.png"), width = width, height = height)
+    plot(regMap)
+    plot(grid_polys$geometry, add = T, border = "yellow", col = NA)
+    plot(grid_polys_land$geometry, add = T, border = "darkgreen", col = NA)
+    dev.off()
+  }
+  
+  return_list = list(grid_polys = grid_polys, grid_points = grid_points,
+                     grid_polys_land = grid_polys_land, grid_points_land = grid_points_land)
+  return(return_list)
+}
+
+
+
+
+
+
+
 
 # ////////////////////////////////
 # helper functions (not exported)
