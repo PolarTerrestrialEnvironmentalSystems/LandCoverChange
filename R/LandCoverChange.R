@@ -3151,7 +3151,7 @@ distancesAndOverlaps = function(ID, env_df, class_defs,
 ##' @importFrom dplyr filter
 ##' @export
 regGrid = function(map, cell_length, 
-                   plot_folder = NULL, width = 1200, height = 800){
+                   save_folder = NULL, width = 1200, height = 800){
   
   library(sf); sf_use_s2(F)
   library(stars)
@@ -3170,22 +3170,324 @@ regGrid = function(map, cell_length,
   grid_polys_land = grid_polys %>% filter(values == 1) %>% select(-values)
   
   # plot water and land cells, only for land cells the land cover will extracted
-  if (!is.null(plot_folder) & (nrow(grid_polys) <= 10**5)){ 
-    png(file.path(plot_folder, "water_land_mask.png"), width = width, height = height)
+  if (!is.null(save_folder) & (nrow(grid_polys) <= 10**5)){ 
+    png(file.path(save_folder, paste0("land_water_mask_res_", as.integer(cell_length), ".png")), 
+        width = width, height = height)
     plot(regMap)
     plot(grid_polys$geometry, add = T, border = "yellow", col = NA)
     plot(grid_polys_land$geometry, add = T, border = "darkgreen", col = NA)
     dev.off()
-  }
+  } 
   
   return_list = list(grid_polys = grid_polys, grid_points = grid_points,
                      grid_polys_land = grid_polys_land, grid_points_land = grid_points_land)
-  return(return_list)
+  
+  if(!is.null(save_folder)){
+    save(return_list, file = file.path(save_folder, paste0("regGrid_res_", as.integer(cell_length), "_m.rda")))
+  } else{
+    return(return_list)
+  }
 }
 
 
 
-
+## ...
+##'
+##' 
+##' @title extractDataGrid
+##' @param 
+##' save_folder
+##' @return ...
+##' \item{\code{...}}{...: ...}
+##' @importFrom dplyr filter
+##' @export
+extractDataGrid = function(grid,
+                           lc_env_folder, clim_flnames, lc_flname, elev_flname,
+                           all_lc_codes, merge_classes, class_defs,
+                           plt_aggregated = F, width = 1200, height = 800,
+                           save_folder = NULL){
+  
+  cat("\nExtract land cover and environmental data:")
+  # load land cover and environmental data sets
+  {
+    landcover = read_stars(file.path(lc_env_folder, lc_flname)) %>%
+      st_set_crs(4326) %>% setNames("Landcover")
+    
+    elevation = read_stars(file.path(lc_env_folder, elev_flname)) %>% 
+      st_set_crs(4326) %>% setNames("Elevation")
+    
+    # climate
+    {
+      climate = lapply(clim_flnames, 
+                       function(u) {
+                         clim_ind = which(clim_flnames == u) 
+                         clim_var = read_stars(file.path(lc_env_folder, u)) %>%
+                           st_set_crs(4326) 
+                         clim_var = setNames(clim_var, clim_vars[clim_ind])
+                         return(clim_var)
+                       })
+      
+      names(climate) = clim_vars
+      }
+    
+    env_vars = c("Elevation", clim_vars)
+  }
+  
+  # project grid to wgs84
+  {
+    grid = grid %>% st_transform(4326)
+  }
+  
+  geometry_type = as.character(st_geometry_type(grid$geometry[1])) 
+  if (geometry_type == "POLYGON"){
+    # extract Landcover
+    {
+      cat("\n\tVariable:", "Landcover")
+      
+      sample_region = 1:nrow(grid) # sample instead for developing: sample_region = sample(1:nrow(grid), min(nrow(grid), 10))
+      
+      # extract the landcover compostion in each cell
+      lc_region = do.call(rbind,
+                          parallel::mclapply(sample_region, 
+                                             function(x) {
+                                               lc_dist = suppressMessages(
+                                                 (landcover[grid[x,]$geometry,,] %>% 
+                                                    st_as_stars()) %>% as_tibble() %>% 
+                                                   filter(!is.na(Landcover)) %>%
+                                                   count(Landcover) %>% 
+                                                   mutate(share = n / sum(n))  %>% 
+                                                   select(-n)
+                                               )
+                                               
+                                               # merge lc classes and fill missing with 0%
+                                               {
+                                                 for (merge_class in classes_to_merge){
+                                                   class_inds = which(lc_dist$Landcover %in% merge_class$old_classes)
+                                                   del_shares = lc_dist$share[class_inds] 
+                                                   lc_dist = rbind(lc_dist,
+                                                                   data.frame(Landcover = merge_class$new_class,
+                                                                              share = sum(del_shares)))
+                                                   if (length(class_inds) > 0){ lc_dist = lc_dist[-class_inds,] }
+                                                 }
+                                                 
+                                                 lc_dist = rbind(lc_dist, 
+                                                                 data.frame(Landcover = all_lc_codes[!(all_lc_codes %in% lc_dist$Landcover)],
+                                                                            share = 0))
+                                                 
+                                                 lc_dist = lc_dist %>% arrange(Landcover)
+                                                 
+                                                 if (round(sum(lc_dist$share), 5) != 1){
+                                                   stop("Check aggregation of landcover cells. Sum after merging is not equal 1.")
+                                                 }
+                                               }
+                                               
+                                               ret_df = t(data.frame(lc_dist$share))
+                                               colnames(ret_df) = lc_dist$Landcover; row.names(ret_df) = NULL
+                                               
+                                               return(ret_df)
+                                             }, mc.cores = 1))
+      lc_region = data.frame(grid$cell_ind[sample_region],
+                             st_coordinates(st_centroid(grid)$geometry)[sample_region,1:2]) %>% 
+        cbind(lc_region)
+      colnames(lc_region) = c("cell_ind", "x", "y", paste0("LC", all_lc_codes))
+      row.names(lc_region) = NULL
+      
+      region_lc_stats = apply(lc_region %>% select(starts_with("LC")), 2, mean, na.rm = T)
+    } # output: lc_region und region_lc_stats
+    
+    # find dominant landcover type and plot aggregated landcover of the region
+    {
+      lc_region$Landcover = apply(lc_region%>% select(starts_with("LC")), 1, 
+                                  function(u){
+                                    aggr_class = as.numeric(gsub("LC", "", names(sort(u, decreasing = T)))[1])
+                                  })
+      lc_region = st_as_sf(lc_region, coords = c("x", "y"), crs = 4326) %>% st_shift_longitude()
+      lc_region$Landcover = factor(lc_region$Landcover,
+                                   levels = all_lc_codes[all_lc_codes %in%
+                                                           unique(lc_region$Landcover)])
+      if (plt_aggregated){
+        plt = ggplot() +
+          geom_sf(data = regMap %>% st_transform(4326) %>% st_shift_longitude(), fill = NA, col = "grey20", linewidth = 0.4) +
+          geom_sf(data = lc_region[sample(1:nrow(lc_region), min(nrow(lc_region), 10000)),],
+                  aes(colour = Landcover), 
+                  size = 1.5, alpha = 0.7) +
+          scale_colour_manual(breaks = all_lc_codes[all_lc_codes %in% levels(lc_region$Landcover)],
+                              labels = paste0((class_defs %>% filter(Class_Code %in% levels(lc_region$Landcover)))$Variable_Name, " ",
+                                              (class_defs %>% filter(Class_Code %in% levels(lc_region$Landcover)))$Class_Plotlabel),
+                              values = (class_defs %>% filter(Class_Code %in% levels(lc_region$Landcover)))$Color_Code) +
+          labs(x = "Longitude", y = "Latitude",
+               fill = "Landcover Type", title = paste0("Sample with ", min(nrow(lc_region), 5000), 
+                                                       " cells of aggregated and merged Land Cover Types")) +
+          theme_minimal() + 
+          guides(colour = guide_legend(override.aes = list(size=5, alpha = 1)))
+        
+        if (!is.null(save_folder)){
+          png(file.path(save_folder, paste0("landcover_regGrid_res_", as.integer(cell_length), "_m.png")),
+              width = width, height = height)
+          print(plt)
+          dev.off()
+        } else{
+          print(plt)
+        }
+      }
+    } # output: save lc_region from here as sf object or the one before?
+    
+    # extract elevation
+    {
+      
+      cat("\n\tVariable:", "Elevation")
+      
+      # extract the median elevation value for each grid cell
+      elev_region = parallel::mclapply(sample_region,  
+                                       function(x) {
+                                         suppressMessages(
+                                           median((elevation[grid[x,],,] %>% 
+                                                     st_as_stars()) %>% as_tibble() %>% 
+                                                    filter(!is.na(Elevation)) %>% 
+                                                    pull(Elevation), na.rm = T)
+                                         )
+                                       }, mc.cores = 1) %>% unlist()
+      
+      elev_region = cbind(data.frame(cell_ind = grid$cell_ind[sample_region],
+                                     elev_region))
+    }
+    
+    # extract bio-clim variables
+    {
+      for (clim_ind in 1:length(climate)){
+        
+        clim_name = names(climate[[clim_ind]])
+        clim_var = climate[[clim_ind]]
+        cat("\n\tVariable:", clim_name)
+        
+        # extract the median elevation value for each grid cell
+        var_region = parallel::mclapply(sample_region, 
+                                        function(x) {
+                                          suppressMessages(
+                                            median((clim_var[grid[x,],,] %>% 
+                                                      st_as_stars()) %>% as_tibble() %>% 
+                                                     filter(!is.na(!!as.name(clim_name))) %>% 
+                                                     pull(!!as.name(clim_name)), 
+                                                   na.rm = T)
+                                          )
+                                        }, mc.cores = 1) %>% unlist()
+        
+        var_region = cbind(data.frame(grid$cell_ind[sample_region],
+                                      var_region))
+        colnames(var_region) = c("cell_ind", clim_name)
+        
+        if (clim_ind == 1){
+          vars_region = var_region
+        } else{
+          vars_region = left_join(vars_region, var_region, by = "cell_ind")
+        }
+      }
+    }
+    
+    # bind all variables together
+    {
+      coords = st_coordinates(lc_region$geometry)[,1:2]
+      df_all = st_as_sf(cbind(cell_ind = lc_region$cell_ind,
+                              x = coords[,1],
+                              y = coords[,2],
+                              Landcover = lc_region$Landcover,
+                              Elevation = elev_region  %>% select(-cell_ind), 
+                              vars_region %>% select(-cell_ind),
+                              geometry = lc_region$geometry
+      ), crs = 4326)
+      colnames(df_all) = c("cell_ind", "x", "y", "Landcover", env_vars, "geometry")
+    }
+    
+    
+    # edit NAs
+    {
+      # set growing degree days NAs to zero
+      df_all = df_all %>% mutate(across(all_of(c("gdd0", "gdd5", "gdd10")), 
+                                        ~replace_na(.x, 0)))
+      
+      # drop remaining rows with any NA-value
+      df_all = df_all %>% filter(rowSums(is.na(.)) == 0)
+    }
+    
+    # sort out classes not included in the calibration for the full region
+    {
+      
+      df_all = df_all %>% filter(Landcover %in% include_calib_codes)
+      
+      lc_stats_final = as.data.frame(
+        df_all %>% st_drop_geometry() %>% group_by(Landcover) %>% 
+          summarize(Nr_Cells = length(Landcover),
+                    Share_Cells =  length(Landcover) / nrow(df_all) * 100)
+      )
+    }
+    
+    
+    # plot aggregated env. variables
+    if (plt_aggregated){
+      for (plot_var in env_vars){
+        plt = ggplot() +
+          geom_sf(data = regMap, fill = NA, col = "grey20", linewidth = 0.4) +
+          geom_sf(data = st_as_sf(df_all)[sample(1:nrow(df_all), min(nrow(df_all),10000)),],
+                  aes(colour = !!as.name(plot_var)), 
+                  size = 2, alpha = 0.8)  +
+          labs(x = "Longitude", y = "Latitude",
+               fill = plot_var) +
+          theme_minimal() + 
+          guides(colour = guide_legend(override.aes = list(size=5, alpha = 1)))
+        
+        
+        if (!is.null(save_folder)){
+          png(file.path(save_folder, paste0("aggregated_", plot_var, "_regGrid_res_", as.integer(cell_length), "_m.png")),
+              width = width, height = height)
+          print(plt)
+          dev.off()
+        } else{
+          print(plt)
+        }
+      }
+    }
+    
+    # correlation between env. variables
+    {
+      cor_mat = cor(df_all[, env_vars] %>% st_drop_geometry())
+      
+      library(ggcorrplot)
+      row.names(cor_mat) = c("Elevation", clim_labels_breaks)
+      colnames(cor_mat) = c("Elevation", clim_labels_breaks)
+      plt = ggcorrplot(cor_mat,
+                       hc.order = F,
+                       type = "upper",
+                       lab = T, 
+                       colors = c("#6D9EC1", "white", "#E46726")) + 
+        labs(title = "Correlation of Environmental Variables in regMap") + 
+        theme_plot
+      
+      if (!is.null(save_folder)){
+        png(file.path(save_folder, "correlation_env_vars.png"), width = width, height = height)
+        print(plt)
+        dev.off()
+      } else{
+        print(plt)
+      }
+    }
+    
+  } else if (geometry_type == "POINT"){
+    cat("\n not implemented for point geometries yet.")
+    
+    # extract exactly the value at each grid point's centre, e.g.:
+    # elev_region = suppressMessages(
+    #     st_extract(elevation, grid) %>% st_as_stars()
+    # )
+  } 
+  
+  return_list = list(lc_env_region = df_all, 
+                     lc_stats_extracted = region_lc_stats, lc_stats_dominant = lc_stats_final)
+  if (!is.null(save_folder)){
+    save(return_list, file = file.path(save_folder, "extractDataGrid.rda"))
+  } else{
+    return(df_all)
+  }
+}
 
 
 
