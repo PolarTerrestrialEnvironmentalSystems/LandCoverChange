@@ -3203,9 +3203,10 @@ regGrid = function(map, cell_length,
 ##' @export
 extractDataGrid = function(grid,
                            lc_env_folder, clim_flnames, lc_flname, elev_flname,
-                           all_lc_codes, merge_classes, class_defs,
+                           all_lc_codes, del_classes = NULL, merge_classes, class_defs,
                            plt_aggregated = F, width = 1200, height = 800,
-                           save_folder = NULL){
+                           save_folder = NULL,
+                           n_parallel = 1){
   
   cat("\nExtract land cover and environmental data:")
   # load land cover and environmental data sets
@@ -3259,6 +3260,16 @@ extractDataGrid = function(grid,
                                                    select(-n)
                                                )
                                                
+                                               # if provided set del_classes to NA-class 0
+                                               {
+                                                 if (!is.null(del_classes)){
+                                                   sum_del_shares = sum(lc_dist$share[lc_dist$Landcover %in% del_classes])
+                                                   lc_dist = rbind(lc_dist, 
+                                                                   data.frame(Landcover = 0, share = sum_del_shares))
+                                                   lc_dist = lc_dist %>% filter(!(Landcover %in% del_classes))
+                                                 }
+                                               }
+                                               
                                                # merge lc classes and fill missing with 0%
                                                {
                                                  for (merge_class in classes_to_merge){
@@ -3270,9 +3281,13 @@ extractDataGrid = function(grid,
                                                    if (length(class_inds) > 0){ lc_dist = lc_dist[-class_inds,] }
                                                  }
                                                  
-                                                 lc_dist = rbind(lc_dist, 
-                                                                 data.frame(Landcover = all_lc_codes[!(all_lc_codes %in% lc_dist$Landcover)],
-                                                                            share = 0))
+                                                 # add classes missing in that geometry
+                                                 add_classes = all_lc_codes[!(all_lc_codes %in% lc_dist$Landcover)]
+                                                 if (length(add_classes) >0){
+                                                   add_df = data.frame(Landcover = all_lc_codes[!(all_lc_codes %in% lc_dist$Landcover)],
+                                                                       share = 0)
+                                                   lc_dist = rbind(lc_dist, add_df)
+                                                 }
                                                  
                                                  lc_dist = lc_dist %>% arrange(Landcover)
                                                  
@@ -3285,10 +3300,12 @@ extractDataGrid = function(grid,
                                                colnames(ret_df) = lc_dist$Landcover; row.names(ret_df) = NULL
                                                
                                                return(ret_df)
-                                             }, mc.cores = 1))
-      lc_region = data.frame(grid$cell_ind[sample_region],
-                             st_coordinates(st_centroid(grid)$geometry)[sample_region,1:2]) %>% 
-        cbind(lc_region)
+                                             }, mc.cores = n_parallel))
+      lc_region = suppressWarnings(
+        data.frame(grid$cell_ind[sample_region],
+                   st_coordinates(st_centroid(grid)$geometry)[sample_region,1:2]) %>%
+          cbind(lc_region)
+      )
       colnames(lc_region) = c("cell_ind", "x", "y", paste0("LC", all_lc_codes))
       row.names(lc_region) = NULL
       
@@ -3346,7 +3363,7 @@ extractDataGrid = function(grid,
                                                     filter(!is.na(Elevation)) %>% 
                                                     pull(Elevation), na.rm = T)
                                          )
-                                       }, mc.cores = 1) %>% unlist()
+                                       }, mc.cores = n_parallel) %>% unlist()
       
       elev_region = cbind(data.frame(cell_ind = grid$cell_ind[sample_region],
                                      elev_region))
@@ -3370,7 +3387,7 @@ extractDataGrid = function(grid,
                                                      pull(!!as.name(clim_name)), 
                                                    na.rm = T)
                                           )
-                                        }, mc.cores = 1) %>% unlist()
+                                        }, mc.cores = n_parallel) %>% unlist()
         
         var_region = cbind(data.frame(grid$cell_ind[sample_region],
                                       var_region))
@@ -3384,41 +3401,40 @@ extractDataGrid = function(grid,
       }
     }
     
-    # bind all variables together
-    {
-      coords = st_coordinates(lc_region$geometry)[,1:2]
-      df_all = st_as_sf(cbind(cell_ind = lc_region$cell_ind,
-                              x = coords[,1],
-                              y = coords[,2],
-                              Landcover = lc_region$Landcover,
-                              Elevation = elev_region  %>% select(-cell_ind), 
-                              vars_region %>% select(-cell_ind),
-                              geometry = lc_region$geometry
-      ), crs = 4326)
-      colnames(df_all) = c("cell_ind", "x", "y", "Landcover", env_vars, "geometry")
-    }
-    
-    
-    # edit NAs
-    {
-      # set growing degree days NAs to zero
-      df_all = df_all %>% mutate(across(all_of(c("gdd0", "gdd5", "gdd10")), 
-                                        ~replace_na(.x, 0)))
+      # bind all variables together
+      {
+          coords = st_coordinates(lc_region$geometry)[,1:2]
+          df_all = st_as_sf(cbind(cell_ind = lc_region$cell_ind,
+                                  x = coords[,1],
+                                  y = coords[,2],
+                                  Landcover = lc_region$Landcover,
+                                  Elevation = elev_region  %>% select(-cell_ind), 
+                                  vars_region %>% select(-cell_ind),
+                                  geometry = lc_region$geometry
+          ), crs = 4326)
+          colnames(df_all) = c("cell_ind", "x", "y", "Landcover", env_vars, "geometry")
+      }
       
-      # drop remaining rows with any NA-value
-      df_all = df_all %>% filter(rowSums(is.na(.)) == 0)
-    }
-    
-    # sort out classes not included in the calibration for the full region
-    {
+      # edit NAs
+      {
+        # set growing degree days NAs to zero
+        df_all = df_all %>% mutate(across(all_of(c("gdd0", "gdd5", "gdd10")), 
+                                          ~replace_na(.x, 0)))
+        
+        # drop remaining rows with any NA-value
+        df_all = df_all %>% filter(rowSums(is.na(.)) == 0)
+      }
       
-      df_all = df_all %>% filter(Landcover %in% include_calib_codes)
-      
-      lc_stats_final = as.data.frame(
-        df_all %>% st_drop_geometry() %>% group_by(Landcover) %>% 
-          summarize(Nr_Cells = length(Landcover),
-                    Share_Cells =  length(Landcover) / nrow(df_all) * 100)
-      )
+      # sort out classes not included in the calibration for the full region
+      {
+        
+        df_all = df_all %>% filter(Landcover %in% include_calib_codes)
+        
+        lc_stats_final = as.data.frame(
+          df_all %>% st_drop_geometry() %>% group_by(Landcover) %>% 
+            summarize(Nr_Cells = length(Landcover),
+                      Share_Cells =  length(Landcover) / nrow(df_all) * 100)
+        )
     }
     
     
@@ -3460,7 +3476,7 @@ extractDataGrid = function(grid,
                        lab = T, 
                        colors = c("#6D9EC1", "white", "#E46726")) + 
         labs(title = "Correlation of Environmental Variables in regMap") + 
-        theme_plot
+        theme_minimal()
       
       if (!is.null(save_folder)){
         png(file.path(save_folder, "correlation_env_vars.png"), width = width, height = height)
@@ -3483,7 +3499,7 @@ extractDataGrid = function(grid,
   return_list = list(lc_env_region = df_all, 
                      lc_stats_extracted = region_lc_stats, lc_stats_dominant = lc_stats_final)
   if (!is.null(save_folder)){
-    save(return_list, file = file.path(save_folder, "extractDataGrid.rda"))
+    save(return_list, file = file.path(save_folder, paste0("extractDataGrid_res_", cell_length, "_m.rda")))
   } else{
     return(df_all)
   }
@@ -3493,10 +3509,22 @@ extractDataGrid = function(grid,
 
 
 # ////////////////////////////////
-# helper functions (not exported)
+# helper functions
 
+## ...
+##'
+##' 
+##' @title create_subfolders
+##' @param 
+##' save_folder
+##' @return ...
+##' \item{\code{...}}{...: ...}
+##' @importFrom dplyr filter
+##' @export
 create_subfolders = function(x, folder_path, indent=1) {
   
+# this function could probably easily be replaces by an package from a function that reads and saves folder structure from json files or similar
+    
   if (!file.exists(folder_path)){ dir.create(folder_path) }
   
   if ((is.list(x)) & (length(x) >= 1)){
@@ -3531,6 +3559,66 @@ create_subfolders = function(x, folder_path, indent=1) {
   }
 }
 
+## ...
+##'
+##' 
+##' @title projectRegion
+##' @param 
+##' save_folder
+##' @return ...
+##' \item{\code{...}}{...: ...}
+##' @importFrom dplyr filter
+##' @export
+projectRegion = function(lc_env_df, ID, save_folder = NULL){
+  
+  library(vegan)
+  
+  lc_env_df = lc_env_df %>% st_drop_geometry()
+  env_cols = c("Elevation", clim_vars)
+  meta_cols = colnames(lc_env_df %>% select(- any_of(c("Landcover", env_cols))))
+  
+  # z-standardization of the regional environmental data (as we did with the data from the PSAs that were used to build the RDA models)
+  {
+    means_per_var = apply(lc_env_df %>% st_drop_geometry() %>% select(all_of(env_cols)), 2, mean)
+    sd_per_var = apply(lc_env_df  %>% st_drop_geometry() %>% select(all_of(env_cols)), 2, sd)
+    
+    lc_env_df = cbind(lc_env_df[, meta_cols],
+                      do.call(cbind,
+                              lapply(env_cols,
+                                     function(u){
+                                       (lc_env_df[, u] - means_per_var[u]) / sd_per_var[u]
+                                     })),
+                      Landcover = lc_env_df$Landcover)
+    colnames(lc_env_df) = c(meta_cols, env_cols, "Landcover")
+  }
+  
+  # load RDA model site and project RDA scores from regional env data
+  {
+    rda_model = load_rda(file.path(main_dir, "interim_results", "rdaModel", paste0("rdaModel_", ID, ".rda")))$rda_model
+    summary(rda_model)
+    rda_scores = as.data.frame(predict(rda_model, newdata = lc_env_df[, env_cols] %>% st_drop_geometry(),
+                                       type = "wa", scaling = 1))
+    lc_env_df = cbind(lc_env_df[, c(meta_cols, "Landcover")], rda_scores %>% select(RDA1, RDA2)) 
+  }
+  
+  return_list = list(lc_env_df = lc_env_df)
+  if (!is.null(save_folder)){
+    save(return_list, file = file.path(save_folder, paste0("projectRegion_site_", ID, ".rda")))
+  } else{
+    return(return_list)
+  }
+}
+
+## ...
+##'
+##' 
+##' @title load_rda
+##' @param 
+##' save_folder
+##' @return ...
+##' \item{\code{...}}{...: ...}
+##' @importFrom dplyr filter
+##' @export
 load_rda = function(file_name){
   # loads an rda file, and returns it
   load(file_name)
