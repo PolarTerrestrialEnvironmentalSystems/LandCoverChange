@@ -13,7 +13,8 @@ setClass(
    slots = c(regMap     = "sfc_MULTIPOLYGON",
              calibMap   = "sf",
              psas       = "sf",
-             vegetation = "data.frame")
+             vegetation = "data.frame",
+             vegetation_interp = "data.frame")
 )
 
 setMethod("plot", "psaVeg", function(x) {
@@ -258,41 +259,35 @@ interpolate_ages_per_site = function(df,
 ##' \item{\code{...}}{...: ...}
 ##' @importFrom dplyr filter
 ##' @export
-plotVegSite = function(vegCover1, name1, 
-                  vegCover2 = NULL,  name2 = NULL, 
-                  ID = NULL, meta_cols = c("Dataset_ID", "Age",
-                                           "Intersects_regMap", "Intersects_calibMap"),
-                  save_folder = NULL,
-                  n_taxa = NULL){
-  if (is.null(ID)){
-    df_plot = suppressMessages(
-      full_join(cbind(vegCover1, Label = name1),
-                cbind(vegCover2, Label = name2))
-    )
-    
-    ID = paste0(unique(data$Dataset_ID), collapse = "_")
-  } else{
-    df_plot = suppressMessages(
-      full_join(cbind(vegCover1 %>% filter(Dataset_ID == ID), 
-                      Label = name1),
-                cbind(vegCover2 %>% filter(Dataset_ID == ID), 
-                      Label = name2))
-    )
-  }
+plotVegSite = function(psaVeg, 
+                  ID = NULL, 
+                  meta_cols = c("Dataset_ID", "Age"),
+                  n_taxa = NULL) {
   
-  cols = colnames(df_plot %>% select(-any_of(c(meta_cols, "Label"))))
+  if (is.null(ID)) {ID <- psaVeg@vegetation$Dataset_ID[1]}
+
+    
+    df_plot = suppressMessages(
+      full_join(cbind(psaVeg@vegetation        %>% filter(Dataset_ID == ID), 
+                      Label = "Original Vegetation Cover"),
+                cbind(psaVeg@vegetation_interp %>% filter(Dataset_ID == ID), 
+                      Label = "Interpolated Vegetation Cover"))
+    ) %>% relocate(Label, .after = Age)
+    
   
   # select n_taxa taxa
-  if (is.null(n_taxa)){ n_taxa = length(cols) }
-  cols = names(sort(apply(df_plot[,cols], 2, mean, na.rm = T), decreasing = T))[1:n_taxa]
-  df_plot = df_plot[, c(meta_cols, "Label", cols)]
+  cols    = names(sort(apply(df_plot[,-c(1:which(names(df_plot)=="Label"))], 2, mean, na.rm = T), decreasing = T))
+  if (is.null(n_taxa)) { n_taxa = length(cols) }
+  df_plot = df_plot %>% dplyr::select(names(df_plot)[1:which(names(df_plot)=="Label")], cols[1:n_taxa])
   
-  df_plot$Label = factor(df_plot$Label, levels = c(name1, name2))
+  df_plot$Label = factor(df_plot$Label, levels = unique(df_plot$Label))
+  
   plt = suppressMessages(
     plotTS(data = df_plot, 
                      cols = cols,
                      age_name = "Age",
-                     round_ages = F, age_steps = dt, lines_var = "Label",
+                     round_ages = F, 
+                     age_steps = dt, lines_var = "Label",
                      color = "indianred", alpha = 0.7,
                      title = "",
                      share_to_percent = F,
@@ -300,25 +295,8 @@ plotVegSite = function(vegCover1, name1,
                                        " k = ", k))
   )
   
-  if (nrow(df_plot) == 1){
-    plt = plt + 
-      labs(subtitle = paste0("Core has only samples within present and ", dt, ".",
-                             " Those have been averaged and set to year ", 
-                             dt, ". These are currently not visible in this plot,",
-                             "actually there would be points."))
-  }
-  
-  # save or return plt for further modification
-  if (!is.null(save_folder)){
-    clear()
-    png(filename = file.path(save_folder, paste0("site_", ID, )), 
-        width=1200, height=800)
-    print(plt)
-    dev.off()
-  } else{
-    return(plt)
-  }
 }
+
 
 ## plot time series of interpolated and original vegetation cover
 ##'
@@ -431,40 +409,41 @@ plotTS = function(data, cols, age_name, round_ages = T, age_steps = 1000,
 ##' \item{\code{...}}{...: ...}
 ##' @importFrom dplyr filter
 ##' @export
-interpVegTS = function(veg_cover, save_folder = NULL){
+interpVegTS = function(vegetation, cluster = NULL, fc = 1/500, dt = 500, k = 5, silent = TRUE){
+
+  if(!silent) cat("\n\nInterpolate past vegetation time series")
   
-  # packages needed: parallel, zoo, dplyr
-  
-  cat("\n\nInterpolate past vegetation time series")
-  IDs = unique(veg_cover$Dataset_ID)
-  
-  veg_cover_interp = parallel::mclapply(IDs,
-                                        function(x){
-                                          veg_site = veg_cover %>% filter(Dataset_ID == x) %>% arrange(Age)
-                                          veg_site_interp = suppressWarnings(
-                                            interpolate_ages_per_site(df = veg_site %>%
-                                                                        select(-Intersects_regMap, 
-                                                                               -Intersects_calibMap),
-                                                                      meta_cols = c("Dataset_ID",
-                                                                                    "Age"),
-                                                                      fc = fc, dt = dt, k = k)
-                                          )
-                                          
-                                          veg_site_interp = suppressMessages(
-                                            veg_site_interp %>% 
-                                              left_join(unique(veg_site %>% 
-                                                                 select(all_of(c("Dataset_ID", "Intersects_regMap", "Intersects_calibMap")))))
-                                          )
-                                          
-                                          return(veg_site_interp)
-                                        }, mc.cores = parallel_max)
-  veg_cover_interp = suppressMessages(Reduce(full_join, veg_cover_interp))
-  
-  if (!is.null(save_folder)){
-    save(veg_cover_interp, file = file.path(main_dir, "interim_results", "interpVegTS", "interpVegTS.rda"))
-  } else{
-    return(veg_cover_interp)
-  }
+  if(any(class(cluster)=='cluster')) {
+    
+    clusterEvalQ(cl, {
+      library(parallel)
+      library(zoo)
+      library(dplyr)
+      library(corit)
+    })
+    
+    clusterExport(cl, varlist = list('vegetation', 'fc', 'dt', 'k', 'interpolate_ages_per_site'))
+    
+    suppressMessages({
+    (parallel::parLapply(cl, unique(veg_cover$Dataset_ID),
+                                          function(x){
+                                            veg_site = vegetation %>% filter(Dataset_ID == x) %>% arrange(Age)
+                                            suppressWarnings(
+                                              interpolate_ages_per_site(df = veg_site,
+                                                                        meta_cols = c("Dataset_ID",
+                                                                                      "Age"),
+                                                                        fc = fc, dt = dt, k = k))})) %>% Reduce("full_join", .)})
+  } else {
+    suppressMessages({
+      (lapply(unique(veg_cover$Dataset_ID),
+                                              function(x){
+                                                veg_site = vegetation %>% filter(Dataset_ID == x) %>% arrange(Age)
+                                                suppressWarnings(
+                                                  interpolate_ages_per_site(df = veg_site,
+                                                                            meta_cols = c("Dataset_ID",
+                                                                                          "Age"),
+                                                                            fc = fc, dt = dt, k = k))})) %>% Reduce("full_join", .)})
+    }
 }
 
 ## extract modern landcover shares with google earth engine

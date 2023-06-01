@@ -10,8 +10,13 @@ editor_options:
 knitr::opts_chunk$set(echo = T) 
 ```
 
+
+## Setup
+
 ```{r setup, include = FALSE}
 library(LandCoverChange)
+# devtools::install_github("EarthSystemDiagnostics/corit")
+library(corit)
 library(tidyverse)
 library(sf); sf_use_s2(FALSE)
 
@@ -22,7 +27,9 @@ create_subfolders(output_dir, default = TRUE)
 ```
 
 
-Define regions ("regionMap" for land cover reconstruction and calibMap for the calibration of vegetation cover to land cover), create Pollen Source Areas (PSAs) from their site centres and pollen source radius, and extract vegetation cover time series in all PSAs.
+## Study region and vegetation data
+
+Define regions ('regMap' for land cover reconstruction and 'calibMap' for the calibration of vegetation cover to land cover), create Pollen Source Areas (PSAs) from their site centres and pollen source radius, and extract vegetation cover time series in all PSAs.
 
 ```{r psaMap, include=TRUE, message=FALSE, warning=FALSE}
 library(tidyverse)
@@ -54,36 +61,34 @@ calibMap = suppressWarnings(
 psaVeg <- make_psaVeg(veg_folder = file.path(data_dir, "data", "vegetation_cover"),
                       regMap = regMap, calibMap = calibMap)
 
+```
 
-# plot psaVeg Map
+```{r psaVegPlot, fig.height = 10, fig.width = 10}
 plot(psaVeg)
 ```
 
+Interpolate vegetation cover time series to equal intervals
 
+```{r interpolate_veg_cover}
 
-```{r interpolate_veg_cover, fig.height=8, fig.width=12}
-# interpolate vegetaton cover time series to intervals of length dt
+## setup multicore (optional)
+library(parallel)
+cl <- makeCluster(detectCores()/2)
 
-parallel_max = 4 # number of cores for parallel::mclapply
-if (Sys.info()[["sysname"]] == "Windows"){ parallel_max = 1 }
-
-# interpolation parameters for time series
-fc = 1/500; dt = 500; k = 5
-    
-# interp brings some 10% of rows with NA, CHECK WHY!
-interpVegTS(veg_cover, save_folder = file.path(main_dir, "interim_results", "interpVegTS"))
-veg_cover_interp = load_rda(file.path(main_dir, "interim_results", "interpVegTS", "interpVegTS.rda"))
-
-
-# plot one site: compare original and interpolated ages, plot only n_taxa taxa with largest mean abundance
-plotVegSite(vegCover1 = veg_cover, name1 = "Original Vegetation Cover", 
-            vegCover2 = veg_cover_interp,  name2 = "Interpolated Vegetation Cover", 
-            ID = 100055, n_taxa = 12)
-
+psaVeg@vegetation_interp <- interpVegTS(psaVeg@vegetation, cluster = cl, 
+                                        fc = 1/500, dt = 500, k = 5)
 ```
 
 
-# calibration of the vegetation cover - land cover relationship to the modern data
+```{r plotVegSite, fig.height = 8, fig.width = 12}
+# plot one site: compare original and interpolated ages, plot only n_taxa taxa with largest mean abundance
+
+plotVegSite(vegCover1 = psaVeg@vegetation,         name1 = "Original Vegetation Cover", 
+            vegCover2 = psaVeg@vegetation_interp,  name2 = "Interpolated Vegetation Cover", 
+            ID = 100055, n_taxa = 12)
+```
+
+# Calibration of the Vegetation Cover - Land Cover rRlationship to the Modern Data
 
 ## modern vegetation cover shares within each pollen source area
 ```{r veg_modern_shares}
