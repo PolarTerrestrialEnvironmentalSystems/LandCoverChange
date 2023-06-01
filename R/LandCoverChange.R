@@ -10,11 +10,11 @@ NULL
 
 setClass(
   "psaVeg",
-   slots = c(regMap     = "sfc_MULTIPOLYGON",
-             calibMap   = "sf",
-             psas       = "sf",
-             vegetation = "data.frame",
-             vegetation_interp = "data.frame")
+   slots = c(regMap        = "sfc_MULTIPOLYGON",
+             calibMap      = "sf",
+             psas          = "sf",
+             interpolation = "list",
+             vegetation    = "data.frame")
 )
 
 setMethod("plot", "psaVeg", function(x) {
@@ -30,8 +30,8 @@ setMethod("plot", "psaVeg", function(x) {
     geom_sf(ps_poly, mapping = aes(geometry = geometry), alpha = 0.2) +
     # scale_fill_gradientn(colours = c("darkred", "aliceblue")) +
     theme_light()
+  
 })
-
 
 ## Data import
 ##'
@@ -60,56 +60,46 @@ setMethod("plot", "psaVeg", function(x) {
 ##' @importFrom sf st_make_valid
 ##' @importFrom sf st_buffer
 ##' @export
-make_psaVeg <- function(veg_folder, regMap, calibMap, silent = TRUE) {
-  
-  # packages needed: data.table, sf, dplyr, rnaturalearth
+make_psaVeg <- function(veg_folder, regMap, calibMap, interpolate = TRUE, fc = 1/500, dt = 500, k = 5, cluster = NULL, silent = TRUE) {
   
   if(sf_use_s2()) sf_use_s2(F)
-  return_list = list()
   
   # load vegetation and meta data
-  {
-    if(!silent) cat("\nLoad meta and vegetation data\n")
+  if(!silent) cat("\nLoad meta and vegetation data\n")
     
-    # read vegetation cover and meta data
-    file_names <- list.files(veg_folder)
+  # read vegetation cover and meta data
+  file_names <- list.files(veg_folder)
    
-    veg_cover <- lapply(file_names, 
-                        function(x) {
-                          veg_cov = data.table::fread(file.path(veg_folder, x), verbose = !silent, showProgress = !silent)
-                        })
+  veg_cover <- lapply(file_names, 
+                      function(x) {
+                        veg_cov = data.table::fread(file.path(veg_folder, x), verbose = !silent, showProgress = !silent)})
+  names(veg_cover) <- file_names
     
-    names(veg_cover) <- file_names
-    
-    # extract meta data
-    meta_cols_veg = c("Dataset_ID", "Longitude", "Latitude", "Pollen_Source_Radius [m]")
-    meta_data = unique(do.call(rbind,
+  # extract meta data
+  meta_cols_veg = c("Dataset_ID", "Longitude", "Latitude", "Pollen_Source_Radius [m]")
+  meta_data = unique(do.call(rbind,
                                lapply(1:length(veg_cover),
                                       function(x){
                                         veg_cover[[x]] %>% dplyr::select(all_of(meta_cols_veg)) %>% 
                                           cbind(File = names(veg_cover)[x])
                                       })))
-    centres = meta_data %>% sf::st_as_sf(coords = c("Longitude", "Latitude")) %>% sf::st_set_crs(4326)
+  centres = meta_data %>% sf::st_as_sf(coords = c("Longitude", "Latitude")) %>% sf::st_set_crs(4326)
 
-  }
-  
   
   ## Create map with pollen source areas
-  {
-    if(!silent) cat("\nCreate map with pollen source areas")
+  if(!silent) cat("\nCreate map with pollen source areas")
     
     # project sites to target geometry from maps
     if (!(st_crs(regMap) == st_crs(calibMap))){
       stop("The same projection for the region and calibration map must be provided.")
     }
     
-    # filter sites in any regMap or calibrationMap
-    psas = centres %>% st_transform(st_crs(regMap)) %>%
+  # filter sites in any regMap or calibrationMap
+  psas = centres %>% st_transform(st_crs(regMap)) %>%
       filter(c(st_intersects(., st_union(st_union(regMap, calibMap$geometry)), sparse = FALSE))) %>%
       mutate(calibMap = calibMap$groups[unlist(apply(st_intersects(., calibMap, sparse = FALSE), 1, function(x) if(any(x)) which(x) else NA))],
              regMap   = c(st_intersects(., regMap, sparse = FALSE))) %>%
       st_buffer(.$`Pollen_Source_Radius [m]`) %>% relocate(geometry, .after = last_col())
-  }
 
   
   # filter vegetation data based on selected pollen source areas, drop taxa not present, and normalize rows to 1
@@ -149,19 +139,26 @@ make_psaVeg <- function(veg_folder, regMap, calibMap, silent = TRUE) {
   }
   
   
+  ## interpolation
+  if(interpolate) {
+    veg_cover_filtered <- interpVegTS(veg_cover_filtered, cluster = cluster, fc = fc, dt = dt, k = 5, silent = silent)
+  }
+  
   new(
     "psaVeg",
     regMap = regMap,
     calibMap = calibMap,
     psas = psas,
+    interpolation = list(fc = fc, dt = dt, k = 5),
     vegetation = veg_cover_filtered
   )
   
 }
 
+
 ## interpolate vegetation cover
 ##'
-##' ...
+##' can have one or multiple IDs in columns Dataset_ID. If multiple, Interpolation is done seperately and the result is joined.
 ##' @title modernShares
 ##' @param veg_cover
 ##' save_folder
@@ -169,25 +166,52 @@ make_psaVeg <- function(veg_folder, regMap, calibMap, silent = TRUE) {
 ##' \item{\code{...}}{...: ...}
 ##' @importFrom dplyr filter
 ##' @export
-modernVegShares = function(veg_cover, 
-                           time_span_modern,
-                           meta_cols_veg =  c("Dataset_ID", "Age", 
-                                              "Intersects_regMap", "Intersects_calibMap"),
-                           save_folder = NULL){
+##' 
+interpVegTS = function(veg_cover, cluster = NULL, fc = 1/500, dt = 500, k = 5, silent = TRUE){
   
-  taxa_cols_veg = colnames(veg_cover %>% select(-all_of(meta_cols_veg)))
-  veg_modern = veg_cover %>% filter(Intersects_calibMap) %>% filter(Age <= time_span_modern)
-  veg_modern = as.data.frame(veg_modern[,c("Dataset_ID", taxa_cols_veg)] %>%
-                               group_by(Dataset_ID) %>%
-                               summarise(across(everything(), mean, na.rm=T)))
-  row.names(veg_modern) = NULL
+  if(!silent) cat("\n\nInterpolate past vegetation time series")
   
-  if (!is.null(save_folder)){
-    save(veg_modern, file = file.path(save_folder, "modernVegShares.rda"))
-  } else{
-    return(veg_modern)
+  if(any(class(cluster)=='cluster')) {
+    
+    clusterEvalQ(cl, {
+      library(parallel)
+      library(zoo)
+      library(dplyr)
+      library(corit)
+    })
+    
+    clusterExport(cl, varlist = list('veg_cover', 'fc', 'dt', 'k', 'interpolate_ages_per_site'))
+    
+    suppressMessages({
+      (parallel::parLapply(cl, unique(veg_cover$Dataset_ID),
+                           function(x){
+                             
+                             veg_site = veg_cover %>% filter(Dataset_ID == x) %>% arrange(Age)
+                             
+                             veg_site %>% mutate(Interp = FALSE) %>% relocate(Interp, .after = Age) %>%
+                               bind_rows((suppressWarnings({interpolate_ages_per_site(df = veg_site, meta_cols = c("Dataset_ID", "Age"),
+                                                                                     fc = fc, dt = dt, k = k)}) %>% 
+                                                          mutate(Interp = TRUE) %>% relocate(Interp, .after = Age))) %>% arrange(Age, Interp)
+                             
+                             })) %>% Reduce("full_join", .)
+      })
+  } else {
+    suppressMessages({
+      (lapply(unique(veg_cover$Dataset_ID),
+              function(x){
+                
+                veg_site = veg_cover %>% filter(Dataset_ID == x) %>% arrange(Age)
+                
+                veg_site %>% mutate(Interp = FALSE) %>% relocate(Interp, .after = Age) %>%
+                  bind_rows((suppressWarnings({interpolate_ages_per_site(df = veg_site, meta_cols = c("Dataset_ID", "Age"),
+                                                                         fc = fc, dt = dt, k = k)}) %>% 
+                               mutate(Interp = TRUE) %>% relocate(Interp, .after = Age))) %>% arrange(Age, Interp)
+                
+                })) %>% Reduce("full_join", .)})
   }
 }
+
+
 
 ## interpolate vegetation cover of one site
 ##'
@@ -249,6 +273,8 @@ interpolate_ages_per_site = function(df,
   return(df)
 }
 
+
+
 ## plot time series of interpolated and original vegetation cover
 ##'
 ##' ...
@@ -260,272 +286,91 @@ interpolate_ages_per_site = function(df,
 ##' @importFrom dplyr filter
 ##' @export
 plotVegSite = function(psaVeg, 
-                  ID = NULL, 
-                  meta_cols = c("Dataset_ID", "Age"),
-                  n_taxa = NULL) {
+                       ID = unique(psaVeg@vegetation$Dataset_ID)[1], 
+                       meta_cols = c("Dataset_ID", "Age", "Interp"),
+                       n_taxa = NULL, ...) {
   
-  if (is.null(ID)) {ID <- psaVeg@vegetation$Dataset_ID[1]}
-
-    
-    df_plot = suppressMessages(
-      full_join(cbind(psaVeg@vegetation        %>% filter(Dataset_ID == ID), 
-                      Label = "Original Vegetation Cover"),
-                cbind(psaVeg@vegetation_interp %>% filter(Dataset_ID == ID), 
-                      Label = "Interpolated Vegetation Cover"))
-    ) %>% relocate(Label, .after = Age)
-    
+  df_plot = psaVeg@vegetation %>% filter(Dataset_ID == ID)
   
   # select n_taxa taxa
-  cols    = names(sort(apply(df_plot[,-c(1:which(names(df_plot)=="Label"))], 2, mean, na.rm = T), decreasing = T))
-  if (is.null(n_taxa)) { n_taxa = length(cols) }
-  df_plot = df_plot %>% dplyr::select(names(df_plot)[1:which(names(df_plot)=="Label")], cols[1:n_taxa])
+  subtitle <- ifelse(is.null(n_taxa), "All taxa available", glue::glue("Selection of {n_taxa}")) 
+  n_taxa   <- ifelse(is.null(n_taxa), ncol(df_plot)-length(meta_cols), n_taxa)
+  df_plot  <- df_plot %>% dplyr::select(c(meta_cols, 
+                names(sort(apply((df_plot %>% dplyr::select(-meta_cols)), 2, mean, na.rm = T), decreasing = T))[1:n_taxa])) %>%
+                pivot_longer(cols = -c(meta_cols), values_to = "Percentage")
   
-  df_plot$Label = factor(df_plot$Label, levels = unique(df_plot$Label))
-  
-  plt = suppressMessages(
-    plotTS(data = df_plot, 
-                     cols = cols,
-                     age_name = "Age",
-                     round_ages = F, 
-                     age_steps = dt, lines_var = "Label",
-                     color = "indianred", alpha = 0.7,
-                     title = "",
-                     share_to_percent = F,
-                     subtitle = paste0("fc = ", fc, ", dt = ", dt,
-                                       " k = ", k))
-  )
-  
+  ggplot(df_plot %>% filter(!is.na(Percentage))) +
+    geom_path(aes(x = Percentage, y = Age, group = as.factor(Interp), color = as.factor(Interp))) +
+    scale_colour_manual(values = c("#E69F00", "grey60"), name = "Interpolated") +
+    facet_wrap(~name, ...) +
+    labs(title = glue::glue("Pollen source area ID: {ID}"),
+         subtitle = subtitle) +
+    ylim(min(df_plot$Age[]), max(df_plot$Age)) +
+    theme_light() +
+    theme(legend.position = "top")
+
 }
 
 
-## plot time series of interpolated and original vegetation cover
-##'
-##' ...
-##' @title plotVegSite
-##' @param veg_cover
-##' save_folder
-##' @return ...
-##' \item{\code{...}}{...: ...}
-##' @importFrom dplyr filter
-##' @export
-plotTS = function(data, cols, age_name, round_ages = T, age_steps = 1000,
-                            color, lines_var = NULL, lwd = 1, alpha = 1, share_to_percent = F,
-                            title = "", subtitle = ""){
-  
-  library(ggplot2); library(dplyr); library(tidyr); library(scrutiny)    
-  
-  # prepare data
-  {
-    if (!is.null(lines_var)){
-      data = data[, c(age_name, cols, lines_var)]
-    } else{
-      data = data[, c(age_name, cols)]
-    }
-    
-    data = data %>% pivot_longer(cols = all_of(cols), 
-                                 names_to = "Plant",
-                                 values_to = "Percentage")
-    if (share_to_percent){ data$Percentage = data$Percentage * 100 }
-    
-    if (!is.null(lines_var)){
-      if (!is.factor(data[[lines_var]])){
-        data[[lines_var]] = as.factor(data[[lines_var]])
-      }
-    }
-  }
-  
-  # round axis limits
-  {
-    if (round_ages){
-      scale_max_x = round_ceiling(max(data[[age_name]], na.rm = T), -3)
-      scale_min_x = round_floor(min(data[[age_name]], na.rm = T), -3)
-      step_size_x = age_steps
-      values_x = seq(scale_min_x, scale_max_x, step_size_x)
-    } else {
-      values_x = unique(data[[age_name]])
-    }
-    
-    scale_max_y = round_ceiling(max(data$Percentage, na.rm = T), -1)
-    scale_min_y = round_floor(min(data$Percentage, na.rm = T), -1)
-    step_size_y = 10
-    values_y = seq(scale_min_y, scale_max_y, step_size_y)
-  }
-  
-  plt = ggplot(data, aes(x = !!as.name(age_name), y = Percentage)) + 
-    list(
-      if (!is.null(lines_var)){
-        geom_line(aes(colour = !!as.name(lines_var)), linewidth = lwd,
-                  alpha = alpha)
-      } else{
-        geom_line(colour = color, linewidth = lwd,
-                  alpha = alpha)
-      }
-    ) + 
-    facet_wrap(~Plant, ncol = length(cols),
-               scales = "fixed") +
-    scale_x_reverse(breaks = values_x) +
-    scale_y_continuous(breaks = values_y) +
-    coord_flip() + 
-    theme_minimal() + 
-    theme(
-      panel.grid.major = element_blank(),
-      panel.grid.minor = element_blank(), 
-      panel.grid.major.x = element_line(colour="grey80", 
-                                        linewidth=0.075,
-                                        linetype="solid"), 
-      panel.grid.major.y = element_line(colour="grey80", 
-                                        linewidth=0.075,
-                                        linetype="solid"),
-      panel.background = element_rect(color=NA, fill="grey97"), 
-      axis.line = element_line(colour = "grey20"), 
-      strip.text.x = element_text(face = "bold", 
-                                  size = 12, 
-                                  angle = 0, 
-                                  vjust = 0.5, 
-                                  hjust = 0.5), 
-      strip.background = element_rect(color=NA, fill="grey97"),
-      strip.text.y = element_text(angle = 0), 
-      panel.border = element_blank(), 
-      axis.text.x = element_text(angle = 0, hjust = 0.5),
-      plot.title = element_text(size = 16,
-                                hjust = 0),
-      plot.subtitle = element_text(size = 14),
-      axis.text = element_text(size = 12),
-      axis.title = element_text(size = 14),
-      plot.margin = unit(rep(1.25, 4), "cm")) +
-    labs(x = "Percentage (%)", y = "Age BP (years)",
-         title = title, subtitle = subtitle) 
-  
-  return(plt)
-}
-
-## interpolate vegetation cover
-##'
-##' can have one or multiple IDs in columns Dataset_ID. If multiple, Interpolation is done seperately and the result is joined.
-##' @title modernShares
-##' @param veg_cover
-##' save_folder
-##' @return ...
-##' \item{\code{...}}{...: ...}
-##' @importFrom dplyr filter
-##' @export
-interpVegTS = function(vegetation, cluster = NULL, fc = 1/500, dt = 500, k = 5, silent = TRUE){
-
-  if(!silent) cat("\n\nInterpolate past vegetation time series")
-  
-  if(any(class(cluster)=='cluster')) {
-    
-    clusterEvalQ(cl, {
-      library(parallel)
-      library(zoo)
-      library(dplyr)
-      library(corit)
-    })
-    
-    clusterExport(cl, varlist = list('vegetation', 'fc', 'dt', 'k', 'interpolate_ages_per_site'))
-    
-    suppressMessages({
-    (parallel::parLapply(cl, unique(veg_cover$Dataset_ID),
-                                          function(x){
-                                            veg_site = vegetation %>% filter(Dataset_ID == x) %>% arrange(Age)
-                                            suppressWarnings(
-                                              interpolate_ages_per_site(df = veg_site,
-                                                                        meta_cols = c("Dataset_ID",
-                                                                                      "Age"),
-                                                                        fc = fc, dt = dt, k = k))})) %>% Reduce("full_join", .)})
-  } else {
-    suppressMessages({
-      (lapply(unique(veg_cover$Dataset_ID),
-                                              function(x){
-                                                veg_site = vegetation %>% filter(Dataset_ID == x) %>% arrange(Age)
-                                                suppressWarnings(
-                                                  interpolate_ages_per_site(df = veg_site,
-                                                                            meta_cols = c("Dataset_ID",
-                                                                                          "Age"),
-                                                                            fc = fc, dt = dt, k = k))})) %>% Reduce("full_join", .)})
-    }
-}
 
 ## extract modern landcover shares with google earth engine
 ##'
 ##' 
 ##' @title modernLCShares
 ##' @param 
-##' save_folder
 ##' @return ...
 ##' \item{\code{...}}{...: ...}
 ##' @importFrom dplyr filter
 ##' @export
-modernLCShares = function(polygons, resolution, class_defs, merge_classes = NULL,
-                          save_folder = NULL){
+modernLC <- function(psaVeg, psaIDs = NULL, class_defs, GEE = TRUE, lcover.path = NULL) {
   
+  if(is.null(psaIDs)) {
+    psaIDs <- psaVeg@psas$Dataset_ID
+  }
   
-  # extract shares within polygons with GEE
-  {
-    poly_ee = sf_as_ee(polygons$geometry)
+  if(GEE) {
+    if(ee_check(quiet = TRUE)) {
+      
+      roi     = sf_as_ee(psaVeg@psas  %>% filter(Dataset_ID %in% psaIDs) %>% st_transform(4326) %>% st_shift_longitude())
+      dataset = ee$Image("users/slisovski/LandCoverChange_LCCS")
+      
+      # extract number of pixel per class
+      class_areas  = ee$Image$pixelArea()$addBands(dataset)$reduceRegions(
+        collection = roi,
+        reducer    = ee$Reducer$count()$group(groupField = 1),
+        scale      = dataset$projection()$nominalScale()$getInfo()
+      )$getInfo()
+      
+      regLCov = lapply(class_areas$features, function(x) {
+        lapply(x[[4]][[5]], function(y) tibble(id   = x[[4]][[1]], 
+                                               lcov  = as.factor(as.numeric(y$group)), 
+                                               count = y$count)) %>% bind_rows() 
+      }) %>% do.call("rbind",.)
+      
+      ## merge and filter
+      
+      suppressMessages({
+      out <- regLCov %>% filter(lcov %in% class_defs$Class_Code[class_defs$Include_Class_In_Calibration]) %>%
+        left_join(tibble(lcov = as.factor(class_defs$Class_Code),
+                         out_class = as.factor(ifelse(is.na(class_defs$Merge_To_Class), class_defs$Class_Code, class_defs$Merge_To_Class))), by = "lcov") %>%
+        group_by(id, out_class) %>% summarise(count = sum(count)) %>% rename(Dateset_ID = id, lcov = out_class) %>%
+        group_by(Dateset_ID) %>% mutate(perc = (count/sum(count, na.rm = T))*100) %>% dplyr::select(-count) %>%
+        pivot_wider(names_from = lcov, values_from = perc, values_fill = 0) %>% ungroup()
+      })
+      
+      out[,c(1, order(as.numeric(names(out)[-1]), decreasing = F)+1)] 
+      
+    } else stop("rgee not (correctly) configured. Fix or use GEE = FALSE instead.")
+  } else {
     
-    #dataset = ee$Image('ESA/GLOBCOVER_L4_200901_200912_V2_3')$select('landcover')
-    dataset = ee$Image("users/slisovski/LandCoverChange_LCCS")
-    # Map$addLayer(dataset, {}, 'Landcover')
-    # ee_print(dataset)
-    
-    # extract number of pixel per class
-    class_areas  = ee$Image$pixelArea()$addBands(dataset)$reduceRegions(
-      collection = poly_ee,
-      reducer    = ee$Reducer$count()$group(groupField = 1),
-      scale      = resolution
-    )$getInfo()
-    
-    class_defs_orig = class_defs %>% filter(is.na(Merge_To_Class)) %>% select(Class_Code, Class_Plotlabel) %>% 
-      rename(lcov = Class_Code)
-    class_defs_orig$lcov = factor(class_defs_orig$lcov)
-    
-    regLCov = lapply(class_areas$features, function(x) {
-      lapply(x[[4]][[1]], function(y) tibble(group = x[[3]], 
-                                             lcov = as.factor(as.numeric(y$group)), 
-                                             count = y$count
-      )) %>% bind_rows() 
-    }) %>% do.call("rbind",.) 
-    regLCov = regLCov %>% left_join(data.frame(group = as.character(0:(nrow(polygons)-1)),
-                                               Dataset_ID = polygons$Dataset_ID))
-    
-    regLCov = regLCov %>% 
-      full_join(tibble(group = as.character(rep(seq(0, length(polygons)-1), each = nrow(class_defs_orig))), 
-                       lcov = rep(class_defs_orig$lcov, length(polygons))), 
-                by = c("group", "lcov")) %>%
-      arrange(as.numeric(as.character(group)), as.numeric(as.character(lcov))) %>% 
-      filter(!is.na(Dataset_ID)) %>%
-      mutate(count = ifelse(is.na(count), 0, count)) %>%
-      group_by(group) %>% mutate(perc = (count/sum(count, na.rm = T))*100) %>% dplyr::select(-count) %>%
-      pivot_wider(names_from = lcov, values_from = perc, values_fill = 0) %>% ungroup() %>% select(-group)
-    
+    stop("sf method not yet implemented - too slow ;-)")
     
   }
   
-  # merge classes and sort columns
-  {
-    if (!is.null(merge_classes)){
-      for (merge_class in merge_classes){
-        old_cl = merge_class$old_classes
-        new_cl = merge_class$new_class
-        
-        regLCov = regLCov %>% 
-          mutate(new_cl = apply(regLCov %>% select(any_of(as.character(old_cl))), 1, sum)) %>%
-          select(-any_of(as.character(old_cl)))
-        regLCov[[as.character(new_cl)]] = regLCov[["new_cl"]]
-        regLCov = regLCov %>% select(-new_cl)
-      }
-    }
-    
-    regLCov = regLCov[, c("Dataset_ID", as.character(sort(as.numeric(colnames(regLCov %>% select(-Dataset_ID))))))]
-  }
-  
-  if (!is.null(save_folder)){
-    save(regLCov, file = file.path(save_folder, "modernLCShares.rda"))
-  } else{
-    return(regLCov)
-  }
 }
+
+
+
 
 ## ...
 ##'
