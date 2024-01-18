@@ -117,6 +117,8 @@ make_psaVeg <- function(psa, radius, buffer, resolution, proj = "laea",
   ## interpolation
   if(interpolate) {
     veg_cover_filtered_interp <- interpVegTS(veg_cover_filtered, cluster = cluster, fc = fc, dt = dt, k = 5, silent = silent)
+  } else {
+    veg_cover_filtered_interp <- veg_cover_filtered %>% mutate(interp = FALSE)
   }
   
   ### Maps ###
@@ -136,7 +138,7 @@ make_psaVeg <- function(psa, radius, buffer, resolution, proj = "laea",
     resolution     = resolution,
     psas           = psas,
     interpolation  = list(fc = fc, dt = dt, k = 5),
-    vegetation     = veg_cover_filtered
+    vegetation     = veg_cover_filtered_interp
   )
   
 }
