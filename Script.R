@@ -17,6 +17,7 @@ library(sf); sf_use_s2(FALSE)
 library(stars)
 library(ggplot2)
 library(patchwork)
+library(tensorflow)
 
 source("functions/LandCoverChange.R")
 
@@ -48,7 +49,7 @@ psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hem
 
 
 for(rr in 1:nrow(psa_metadata)) {
-  rr <- 470
+  rr <- 15
   
   cat("\n")
   print(paste0("region grid: ", psa_metadata$Dataset_ID[rr]," (",rr,"/",nrow(psa_metadata),")"))
@@ -300,16 +301,62 @@ for(rr in 1:nrow(psa_metadata)) {
       ### save results
       save(psaCrds, file = glue::glue("{dir_out}/psaCrds/psaCrds_{ID}.rda"))
         
-    } ## end 3.1
+    } 
+  
+  }## end 3.1
   
   
-  ## z-transformation
-  ## climMaps
-  ## z Trans
-  
-}
-  
-  ## ztrans / environm
+  #### 3.2 Add climate variables & z-transformation parameters
+  {
+      load(glue::glue("{dir_out}/psaCrds/psaCrds_{ID}.rda"))
+      
+      if(!file.exists(glue::glue("{dir_out}/psaEnv/psaEnv_{ID}.rda")) & check_files) {
+        
+        clim_variables <- read_xlsx(glue::glue("{data_dir}/settings/bioclim_vars_definitions.xlsx"))
+        clim_dir       <- list.files(glue::glue("{data_dir}/data/global_maps"), pattern = "*.tif", full.names = T)
+      
+        clim_stars <- lapply(clim_variables$Var_Name, function(x) {
+          ind <- which(sapply(clim_dir, function(y) grepl(glue::glue("_{x}_"), y, fixed = T)))
+          read_stars(clim_dir[ind]) %>% setNames(x)
+        })
+        
+        psaEnv_init <- lapply(clim_stars, function(x) st_extract(x, psaCrds) %>% pull(1) %>% unlist()) %>% Reduce("cbind", .) %>% 
+          as_tibble() %>% setNames(clim_variables$Var_Name) %>% mutate(
+            elev = st_extract(read_stars(clim_dir[grepl("ETOPO", clim_dir)]) %>% st_set_crs(4326) %>% setNames("elev"), psaCrds) %>% pull(1) 
+          )
+        
+        ##### NUR KLASSEN DIE AUCH BEWEGT WERDEN SOLLEN!!!!
+        
+        ## transformation parameters
+        allCim <- append(lapply(clim_variables$Var_Name, function(x) {
+          ind  <- which(sapply(clim_dir, function(y) grepl(glue::glue("_{x}_"), y, fixed = T)))
+          c((read_stars(clim_dir[ind]) %>% setNames(x) %>% 
+            st_crop(psaVeg@psas %>% filter(Dataset_ID==current_psa$Dataset_ID) %>% st_buffer(.$'Pollen_Source_Radius [m]') %>% st_transform(4326)) %>%
+            st_as_stars())[[1]]) %>% suppressMessages()
+          }), list((read_stars(clim_dir[grepl("ETOPO", clim_dir)]) %>% st_set_crs(4326) %>%
+                 st_crop(psaVeg@psas %>% filter(Dataset_ID==current_psa$Dataset_ID) %>% st_buffer(.$'Pollen_Source_Radius [m]') %>% st_transform(4326)) %>%
+                 st_as_stars())[[1]]) %>% suppressMessages())  
+        
+        z_tranTab <- lapply(1:ncol(psaEnv_init), function(x) {
+          tibble(Var_Name = c(clim_variables$Var_Name, "elev")[x], 
+                 mean = mean(c(psaEnv_init %>% pull(x), allCim[[x]]), na.rm = T),
+                 sd   = sd(c(psaEnv_init %>% pull(x), allCim[[x]]), na.rm = T))
+        }) %>% Reduce("rbind", .)
+        
+        ## apply z transformation to psaEnv
+        psaEnv <- lapply(1:ncol(psaEnv_init), function(x) {
+          dat = psaEnv_init %>% pull(x)
+          dat[is.na(dat)] <- median(dat, na.rm = T)
+          tibble(c(scale(dat, z_tranTab[x,2], z_tranTab[x,3])))
+        }) %>% Reduce("cbind",.) %>% setNames(names(psaEnv_init))
+        
+        
+        save(psaEnv, file = glue::glue("{dir_out}/psaEnv/psaEnv_{ID}.rda"))
+        save(psaEnv, file = glue::glue("{dir_out}/psaEnv/z_tranTab_{ID}.rda"))
+      }
+    } ## end 3.2
+    
+  #### 3.3   
   
 }
   
