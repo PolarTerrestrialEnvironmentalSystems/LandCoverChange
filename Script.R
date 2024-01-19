@@ -6,6 +6,7 @@
 ###         Thomas Böhmer     ###
 #################################
 
+library(tensorflow)
 library(rgee)
 library(geojson)
 library(tidyr)
@@ -17,7 +18,7 @@ library(sf); sf_use_s2(FALSE)
 library(stars)
 library(ggplot2)
 library(patchwork)
-library(tensorflow)
+
 
 source("functions/LandCoverChange.R")
 
@@ -49,7 +50,7 @@ psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hem
 
 
 for(rr in 1:nrow(psa_metadata)) {
-  rr <- 15
+  rr <- 32
   
   cat("\n")
   print(paste0("region grid: ", psa_metadata$Dataset_ID[rr]," (",rr,"/",nrow(psa_metadata),")"))
@@ -134,14 +135,13 @@ for(rr in 1:nrow(psa_metadata)) {
   #### 2.2 CCI LandCover map of PSA
   {
     roi = sf_as_ee(psaVeg@regionMap %>% st_transform(4326) %>% st_shift_longitude())
-    
-    dataset = ee$Image(glue::glue("users/slisovski/LandCoverChange/LandCover_CCI_{resolution}"))$clip(roi)
+    dataset <- ee$Image(glue::glue("users/slisovski/LandCoverChange/LandCover_CCI_{resolution}"))
     
     if(!file.exists(glue::glue("{dir_out}/summaryResults/dataset_rast.tiff")) & check_files) {
-      dataset_rast <- ee_as_stars(dataset, via = 'drive', quiet = TRUE)
+      dataset_rast <- getLCCfromGEE(dataset, psaVeg@regionMap, y_max = 500, buffer = 0.1)
       write_stars(dataset_rast, glue::glue("{dir_out}/summaryResults/dataset_rast.tiff"))
-    }
-    
+    }    
+       
     # extract number of pixel per class
     class_areas  = ee$Image$pixelArea()$addBands(dataset)$reduceRegions(
       collection = roi,

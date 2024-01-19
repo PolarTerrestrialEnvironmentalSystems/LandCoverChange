@@ -323,6 +323,32 @@ modernLC <- function(psaVeg, psaIDs = NULL,
 }
 
 
+getPxls <- function(geom, scale = 300) {
+  
+  bbox <- st_bbox(psaVeg@regionMap)
+  x_delta <- (as.numeric(bbox[3]) - as.numeric(bbox[1]))/scale
+  y_delta <- (as.numeric(bbox[4]) - as.numeric(bbox[2]))/scale
+  
+  x_delta*y_delta
+  
+}
+
+getLCCfromGEE <- function(ee_dataset, sf_roi, y_max = 500, buffer = 0.5) {
+  
+  pxl <- round(round(getPxls(sf_roi)/250000,0)/2,0)
+  
+  psaGrid <- sf_roi %>% st_transform(4326) %>% st_shift_longitude() %>%
+    st_make_grid(n=c(pxl,pxl)) %>% st_buffer(buffer) %>% suppressWarnings() %>% suppressMessages()
+  
+  out_list <- list()
+  for(i in 1:length(psaGrid)) {
+    out_list[[i]] <- ee_as_stars(ee_dataset$clip(psaGrid[i] %>% sf_as_ee()), via = 'drive', quiet = TRUE) %>% 
+      st_as_stars() %>% mutate(LandCover_CCI_300.tif = ifelse(LandCover_CCI_300.tif<1, NA, LandCover_CCI_300.tif))
+  }
+  
+  do.call("st_mosaic", out_list)[sf_roi %>% st_transform(st_crs(out_list[[1]])),,,] %>% suppressMessages()
+}
+
 getClasses <- function(psaVeg, psaIDs = NULL, radius = 0) {
   
   roi     = sf_as_ee(psaVeg@psas  %>% filter(Dataset_ID %in% psaIDs) %>% st_buffer(radius) %>% st_transform(4326) %>% st_shift_longitude())
