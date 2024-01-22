@@ -959,7 +959,7 @@ for(rr in 1:length(runindex)){
       }
       
       ### plot RDA output
-      plotRDAsummary(IDs[1], dir_out, class_defs)
+      plotRDAsummary(ID, dir_out, class_defs)
       ggsave(glue::glue("{dir_out}/summaryResults/rda_summary.png"), width = 30, height = 22, units = "cm")
       
     

@@ -376,15 +376,23 @@ pixelsBuffer <- function(psa, resolution, class_defs, bufferS, cutoff_PSA = 2500
   if(ee_check(quiet = TRUE) %>% suppressMessages()) {
     
     dataset <- ee$Image(glue::glue("users/slisovski/LandCoverChange/LandCover_CCI_{resolution}"))
-    buffer  <- lapply(bufferS, function(x) psa %>% st_buffer(x))
+    buffer  <- lapply(1:length(bufferS), function(x) {
+      if(x==1) psa else {
+        psa %>% st_buffer(bufferS[x]) %>% st_difference(psa %>% st_buffer(bufferS[x-1])) %>% suppressWarnings()
+      }
+    })
+    
+    mergeTab <- class_defs %>% dplyr::select(Class_Code, Merge_To_Class, Predicted_In_Past) %>%
+      filter(!is.na(Merge_To_Class) & Predicted_In_Past) %>% mutate(Class_Code = as.factor(Class_Code))
     
     
     for(r in 1:length(buffer)) {
       
-      roi <- buffer[[r]] %>% sf_as_ee()
+      roi <- buffer[[r]] %>% st_geometry() %>% sf_as_ee()
+      
       # Map$addLayer(center %>% sf_as_ee(), {}, "center") +
       # Map$addLayer(roi, {}, "center")
-
+      
       # extract number of pixel per class
       class_areas  = ee$Image$pixelArea()$addBands(dataset)$reduceRegions(
         collection = roi,
@@ -394,21 +402,13 @@ pixelsBuffer <- function(psa, resolution, class_defs, bufferS, cutoff_PSA = 2500
       
       regLCov = lapply(class_areas$features[[1]][[4]]$groups, function(x) {
         tibble(lcov  = as.factor(as.numeric(x$group)), 
-                                     count = x$count)
+               count = x$count)
       }) %>% do.call("rbind",.)
       
-      # regLCov %>% left_join(class_defs %>% 
-      #                         mutate(Merge_To_Class = ifelse(is.na(Merge_To_Class), Class_Code, Merge_To_Class)) %>%
-      #                         filter(Predicted_In_Past) %>% mutate(lcov = as.factor(Class_Code)) %>% dplyr::select(lcov, Merge_To_Class), by = "lcov") %>%
-      #   filter(!is.na(Merge_To_Class)) %>%
-      #   group_by(id, Merge_To_Class) %>% summarise(count = sum(count)) %>% rename(Dataset_ID = id, lcov = Merge_To_Class) %>% mutate(radius = r, .after = Dataset_ID)
-      
-      suppressMessages({
-        mrg <- regLCov %>% filter(lcov %in% class_defs$Class_Code[class_defs$Include_Class_In_Calibration]) %>%  ### | lcov %in% c(10,11,12,15,20,30,40,190) 
-          left_join(tibble(lcov = as.factor(class_defs$Class_Code),
-                           out_class = as.factor(ifelse(is.na(class_defs$Merge_To_Class), class_defs$Class_Code, class_defs$Merge_To_Class))), by = "lcov") %>%
-          group_by(out_class) %>% summarise(count = sum(count)) %>% rename(lcov = out_class) %>% mutate(radius = bufferS[r], .after = lcov)
-      })
+      mrg <- regLCov %>%
+        right_join(mergeTab, by = join_by("lcov" == "Class_Code")) %>%
+        mutate(count = ifelse(is.na(count), 0, count)) %>%
+        group_by(Merge_To_Class) %>% summarise(count = sum(count)) %>% rename(lcov = Merge_To_Class) %>% mutate(radius = bufferS[r], .after = lcov)
       
       if(r == 1) {
         out <- mrg
@@ -416,14 +416,16 @@ pixelsBuffer <- function(psa, resolution, class_defs, bufferS, cutoff_PSA = 2500
         out <- out %>% bind_rows(mrg)
       }
       
-      if(all(mrg$count>=ifelse(r==1, cutoff_PSA, cutoff_buffer))) break
+      if(all(out %>% filter(radius==0) %>% pull(count)>=cutoff_PSA) | 
+         (any(out$radius>0) & all(out %>% filter(radius>0) %>% group_by(lcov) %>% summarise(count = sum(count)) %>% pull(count)>=cutoff_buffer))) break
       
     }
     
-    out
+    out %>% arrange(lcov, radius)
     
   } else stop("rgee not (correctly) configured. Fix or use GEE = FALSE instead.")
 }
+
 
 regressionModel <- function(psaVeg, lcovShares, vegetation_modern_years = 1000, k_folds = 100, sig_level = 0.05,
                             prefilter_taxa = T, 
@@ -655,16 +657,17 @@ plotRDAsummary <- function(ID, dir_out, class_defs) {
   
   load(glue::glue("{dir_out}/psaCrds/psaCrds_{ID}.rda"))
   load(glue::glue("{dir_out}/psaOvlp/psaOvlp_{ID}.rda"))
+  load(glue::glue("{dir_out}/summaryResults/psaVeg.rda"))
   
   colorTab <- class_defs %>% mutate(Merge_To_Class = ifelse(is.na(Merge_To_Class), Class_Code, Merge_To_Class)) %>% 
     filter(!is.na(Merge_To_Class), !duplicated(Merge_To_Class), !is.na(Color_Code)) %>% filter(Merge_To_Class%in%as.numeric(gsub("LC_", "", psaOvlp@lcov)))
   
   pl1 <- ggplot() +
-    geom_sf(data = psaVeg@calibrationMap$geometry) +
+    geom_sf(data = psaVeg@calibrationMap$geometry %>% st_intersection(psaVeg@psas %>% filter(Dataset_ID==ID) %>% st_buffer(max(psaCrds$dist)*1000))) +
+    geom_sf(data = psaVeg@psas %>% filter(Dataset_ID==ID) %>% st_buffer(psaVeg@psas %>% filter(Dataset_ID==ID) %>% pull(2)), mapping = aes(geometry = geometry), fill = NA, color = "black", linewidth = 1) +
     geom_sf(data = psaVeg@psas %>% filter(Dataset_ID==ID) %>% st_geometry(), mapping = aes(geometry = geometry), fill = NA, color = "red") +  #, linewidth = 1
     geom_sf(data = psaCrds, mapping = aes(geometry = geometry, color = as.factor(lcov)), shape = 16, size = 0.5, show.legend = FALSE) +
     scale_color_manual(values = colorTab$Color_Code, breaks = colorTab$Merge_To_Class, name = "Landcover class", labels = colorTab$Class_Plotlabel) +
-    #geom_sf(data = psaVeg@psas %>% filter(Dataset_ID==ID) %>% st_geometry(), mapping = aes(geometry = geometry), fill = NA, color = "cyan", linewidth = 1) +
     theme_light()
   
   barTab <- psaCrds %>% st_drop_geometry() %>% group_by(lcov) %>% summarise(n = n()) %>% mutate(lcov = factor(lcov, levels = unique(lcov), ordered = F))
@@ -704,6 +707,7 @@ plotRDAsummary <- function(ID, dir_out, class_defs) {
   
   
 }
+
 
 k_fold_cv = function(..., data, k, x_names, y_names, analysis_function, 
                      set_seed = F, seed_int = NULL, prnt = F, 
