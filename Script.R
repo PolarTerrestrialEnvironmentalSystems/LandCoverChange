@@ -53,7 +53,7 @@ psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hem
 
 
 # for(rr in 1:nrow(psa_metadata)) {
-  rr <- 200
+rr <- 38
   
   cat("\n")
   print(paste0("PSA: ", psa_metadata$Dataset_ID[rr]," (",rr,"/",nrow(psa_metadata),")"))
@@ -102,7 +102,6 @@ psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hem
   #### 1.3 Create vegetation object for PSA
   {
     # load data, filter pollen source areas in region and/or calibration subset
-    ##### MAYBE PARALLEL
     if(!file.exists(glue::glue("{dir_out}/summaryResults/psaVeg.rda")) & check_files) {
       psaVeg <- make_psaVeg(psa, radius, calibration_buffer, resolution, proj = "laea",
                             veg_folder = file.path(data_dir, "data", "vegetation_cover"), 
@@ -142,7 +141,7 @@ psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hem
     dataset <- ee$Image(glue::glue("users/slisovski/LandCoverChange/LandCover_CCI_{resolution}"))
     
     if(!file.exists(glue::glue("{dir_out}/summaryResults/dataset_rast.tiff")) & check_files) {
-      dataset_rast <- getLCCfromGEE(dataset, psaVeg@regionMap, y_max = 500, buffer = 0.1)
+      dataset_rast <- getLCCfromGEE(ee_dataset = dataset, sf_roi = psaVeg@regionMap, y_max = 500, buffer = 0.1)
       write_stars(dataset_rast, glue::glue("{dir_out}/summaryResults/dataset_rast.tiff"))
     } else dataset_rast <- read_stars(glue::glue("{dir_out}/summaryResults/dataset_rast.tiff"))
        
@@ -168,7 +167,7 @@ psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hem
     class_defs[class_defs$Include_Class_In_Calibration & is.na(class_defs$Merge_To_Class) & 
                  class_defs$Class_Code %in% regLCov$Class_Code[regLCov$Percent<0.25], 'Include_Class_In_Calibration'] <- FALSE
     
-    if(file.exists(glue::glue("{dir_out}/summaryResults/lcovShares.rda"))) {
+    if(!file.exists(glue::glue("{dir_out}/summaryResults/lcovShares.rda"))) {
       lcovShares <- modernLC(psaVeg, psaIDs = unique(modernVegetation$Dataset_ID), class_defs = class_defs, resolution = resolution)
       save(lcovShares, file = glue::glue("{dir_out}/summaryResults/lcovShares.rda"))
     } else load(glue::glue("{dir_out}/summaryResults/lcovShares.rda"))
@@ -316,7 +315,9 @@ psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hem
   
   #### 3.2 Add climate variables & z-transformation parameters
   {
-      load(glue::glue("{dir_out}/psaCrds/psaCrds_{ID}.rda"))
+    threshold <- 0.15 ### 15 percentile of sample size across samples in one PSA
+      
+    load(glue::glue("{dir_out}/psaCrds/psaCrds_{ID}.rda"))
       
       if(!file.exists(glue::glue("{dir_out}/psaEnv/psaEnv_{ID}.rda")) & check_files) {
         
@@ -372,13 +373,12 @@ psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hem
     } ## end 3.2
     
   #### 3.3 RDA models   
-  threshold <- 0.15 ### 15 percentile of sample size across samples in one PSA
   {
   
     ## psaCrds: coordinates of selected pixels per class
     ## psaEnv:  environmental variable (z-transformed)
     
-    if(!file.exists(glue::glue("{dir_out}/psaOvlp/psaOvlp_{ID}.rda")) & check_files) {
+    if(!file.exists(glue::glue("{dir_out}/psaOvlp/psaOvlp.rda")) & check_files) {
         
         load(glue::glue("{dir_out}/psaCrds/psaCrds_{ID}.rda")) ## psaCrds
         load(glue::glue("{dir_out}/psaEnv/psaEnv_{ID}.rda"))   ## psaEnv
@@ -396,7 +396,7 @@ psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hem
       
         rdaOut <- rdaMod(dataset_sub %>% dplyr::select(-source), ID = ID)
         
-        save(rdaOut, file = glue::glue("{dir_out}/summaryResults/rdaOut_{ID}.rda"))
+        save(rdaOut, file = glue::glue("{dir_out}/summaryResults/rdaOut.rda"))
         
         ### Overlap and centers
         psaOvlp <- make_psaOvlp(rdaOut)
@@ -404,14 +404,14 @@ psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hem
         # plot(psaOvlp@centers)
         # plot(psaOvlp@densities)
         
-        save(psaOvlp, file = glue::glue("{dir_out}/psaOvlp/psaOvlp_{ID}.rda"))
+        save(psaOvlp, file = glue::glue("{dir_out}/psaOvlp/psaOvlp.rda"))
       }
   } ## end 3.3
     
   ### 3.4 plot RDA output
   {
-    if(!file.exists(glue::glue("{dir_out}/summaryResults/rda_summary.png"))) {
-      load(glue::glue("{dir_out}/psaOvlp/psaOvlp_{ID}.rda"))
+    if(!file.exists(glue::glue("{dir_out}/summaryResults/rda_summary.png")) & check_files) {
+      load(glue::glue("{dir_out}/psaOvlp/psaOvlp.rda"))
       plotRDAsummary(ID, dir_out, class_defs)
       ggsave(glue::glue("{dir_out}/summaryResults/rda_summary.png"), width = 30, height = 22, units = "cm")
     }
@@ -447,7 +447,7 @@ psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hem
     }) %>% do.call("c", .) %>% setNames(z_tranTab$Var_Name) %>% merge()
     
    ## LandCover Init Map 
-   if(!file.exists(glue::glue("{dir_out}/summaryResults/map_init.png"))) {
+   if(!file.exists(glue::glue("{dir_out}/summaryResults/map_init.png"))  & check_files) {
       dataset_rast <- read_stars(glue::glue("{dir_out}/summaryResults/dataset_rast.tiff"))
         
       mergeTab    <- class_defs %>% mutate(lcov = ifelse(is.na(Merge_To_Class), Class_Code, Merge_To_Class)) %>%
@@ -456,24 +456,42 @@ psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hem
       initRast    <- dataset_rast %>% st_as_stars() %>% setNames("Landcover") %>% 
           mutate(Landcover = mergeTab$lcov[match(Landcover, mergeTab$Class_Code)]) %>%
           mutate(predict = mergeTab$Predicted_In_Past[match(Landcover, mergeTab$lcov)])
+    
+      
       
       ### Class transfer
       {
         trans <- class_defs %>% mutate(Merge_To_Class = ifelse(!is.na(Merge_To_Class), Merge_To_Class, Class_Code)) %>% filter(Transfer) %>% pull(Merge_To_Class) %>% unique()
         if(any(unique(c(initRast[[1]]))%in%trans)){
-          transPxl <- initRast[1] %>% st_as_sf(na.rm = FALSE) %>% st_centroid() %>% rownames_to_column(var = "index") 
           
+          pl_human <- ggplot() +
+            geom_stars(data = initRast[1], mapping = aes(fill = as.factor(Landcover))) +
+            geom_sf(psaVeg@psas %>% filter(Dataset_ID %in% ID) %>% st_transform(4326), mapping = aes(geometry = geometry), fill = NA, color="cyan") + 
+            scale_fill_manual(values = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(Color_Code),
+                              breaks = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(lcov),
+                              labels = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(Class_Plotlabel), name = "Landcover") +
+            xlab("") + ylab("") +
+            theme_light()
+          
+          ggsave(plot = pl_human, file = glue::glue("{dir_out}/summaryResults/map_init_withHuman.png"), width = 20, height = 12, units = "cm")
+          
+          transPxl <- initRast[1] %>% st_as_sf(na.rm = FALSE) %>% st_centroid() %>% rownames_to_column(var = "index") %>% suppressWarnings()
           transEnv <- st_extract(env_stars, transPxl %>% filter(Landcover %in% trans)) %>% st_as_sf() %>% st_drop_geometry()  
           
-          transRDA <- st_extract(psaOvlp@densities, 
-            as.data.frame(predict(psaOvlp@rda_mod[[1]], 
-                                  newdata = transEnv %>% as.data.frame(), 
-                                  type = "wa", scaling = 1)) %>% dplyr::select("RDA1", "RDA2") %>% st_as_sf(coords = c("RDA1", "RDA2"))) %>% st_as_sf()
+          transRDA <- st_extract(
+            psaOvlp@densities,
+              predict(
+                psaOvlp@rda_mod[[1]],
+                newdata = transEnv %>% as.data.frame(),
+                type = "wa",
+                scaling = 1
+              )[,1:2] %>% apply(., 2, zoo::na.approx) %>% as.data.frame() %>% st_as_sf(coords = c("RDA1", "RDA2"))
+          ) %>% st_as_sf()
           
-          toClass <- as.numeric(gsub("LC_", "", names(rda_human %>% st_drop_geometry())))
+          toClass <- as.numeric(gsub("LC_", "", names(transRDA %>% st_drop_geometry())))
           
-          transCls <- toClass[abind::abind(as.matrix(rda_human %>% st_drop_geometry()),
-            lapply(1:nrow(psaOvlp@centers), function(x) (st_point(as.numeric(psaOvlp@centers[x,])) %>% st_sfc() %>% st_distance(., rda_human %>% st_geometry()))[1,]) %>%
+          transCls <- toClass[abind::abind(as.matrix(transRDA %>% st_drop_geometry()),
+            lapply(1:nrow(psaOvlp@centers), function(x) (st_point(as.numeric(psaOvlp@centers[x,])) %>% st_sfc() %>% st_distance(., transRDA %>% st_geometry()))[1,]) %>%
             Reduce("cbind", .) %>% as.matrix(), along = 3) %>% apply(., 1:2, function(x) ifelse(is.na(x[1]), 0, x[1]) + (1 - x[2])) %>% apply(., 1, function(x) which.max(x))]
           
           transPxl$Landcover[as.numeric(transPxl %>% filter(Landcover %in% trans) %>% pull(index))] <- transCls
@@ -496,158 +514,94 @@ psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hem
   
   }
   
+  #### 4.2 Pixel Flow
+  # {
+  #   # if(!file.exists(glue::glue("{dir_out}/summaryResults/flowPSA.rda")) & check_files) {
+  #     
+    load(glue::glue("{dir_out}/summaryResults/initRast.rda"))
+    load(glue::glue("{dir_out}/summaryResults/rdaOut.rda"))
+    load(glue::glue("{dir_out}/psaOvlp/psaOvlp.rda"))
+
+    psaFlow <- psaLCover@landcover_ts %>% filter(Dataset_ID==ID, Age>500) %>%
+      group_split(Age) %>% #lapply(., function(x) x %>% dplyr::select(Dataset_ID, Age, gsub("LC_", "", psaOvlp@lcov))) %>%
+      Reduce("rbind", .)
+  #     
+  #   classesToMove    <- as.numeric(names(psaFlow)[-c(1:2)])
+  #   
+  #   ### stars as sf & environment   
+  #   init_sf  <- initRast[1] %>% st_as_sf(na.rm = F) %>% st_centroid() %>%
+  #         rowid_to_column(var = 'pxlID') %>% relocate("pxlID", .before = "Landcover") %>%
+  #         filter(Landcover %in% classesToMove) %>% suppressWarnings()
+  #   
+  #   init_env <- st_extract(env_stars, init_sf) %>% st_as_sf() %>% st_drop_geometry() %>% 
+  #         apply(., 2, function(x) { x[is.na(x)] <- median(x, na.rm = T); x }) %>% suppressMessages() 
+  #   
+  #   ### Landcover - Age Matrix
+  #   classFlow <- matrix(nrow = nrow(init_env), ncol = length(psaFlow$Age %>% unique())+1)
+  #   classFlow[,1] <- init_sf$Landcover
+  #   
+  #   ### classes flowPSA
+  #   cls     <- st_dimensions(psaOvlp@densities)$attributes$values
+  #   cls_num <- as.numeric(gsub("LC_", "", cls))
+  #   
+  #   ### class density and distance to centers
+  #   dens  <- lapply(1:dim(psaOvlp@densities)[3], function(x) {
+  #     split(psaOvlp@densities)[x,] %>% setNames("densities") %>% mutate(densities = abs(densities - 1))
+  #   }) %>% do.call("c", .) %>% setNames(cls) %>% merge()
+  #   
+  #   dists <- lapply(1:dim(psaOvlp@densities)[3], function(x) {
+  #     tmp <- split(dens)[x,]
+  #     min <- (tmp %>% st_as_sf() %>% pull(1) %>% which.min())[1]
+  #     tmp %>% mutate(dists = as.numeric(st_distance(tmp %>% st_as_sf(), tmp %>% st_as_sf() %>% slice(min)))*0.5) %>%
+  #       dplyr::select(dists)
+  #   }) %>% do.call("c", .) %>% setNames(cls) %>% merge()
+  #   
+  #   
+  #   ### Pixel flow
+  #   for(y in 2:ncol(classFlow)) {
+  #     
+  #     ## get RDA1 & RDA2 of all pixels
+  #     rda_xy <- as.data.frame(
+  #       predict(
+  #         psaOvlp@rda_mod[[1]],
+  #         newdata = lapply(classFlow[, y - 1], function(x)
+  #           as.numeric(x == cls_num)) %>% do.call("rbind", .) %>%
+  #           as.data.frame() %>% setNames(cls) %>% bind_cols(init_env),
+  #         type = "wa",
+  #         scaling = 1
+  #       )
+  #     ) %>% dplyr::select("RDA1", "RDA2") %>% st_as_sf(coords = c("RDA1", "RDA2"))
+  #     
+  #     ## calculate costs based on rda density & distance to center of each class
+  #     costs  <-
+  #       abind::abind(
+  #         as.matrix(st_extract(dens, rda_xy) %>% st_as_sf() %>% st_drop_geometry()),
+  #         as.matrix(st_extract(dists, rda_xy) %>% st_as_sf() %>% st_drop_geometry()),
+  #         along = 3
+  #       ) %>% apply(., 1:2, sum, na.rm = T)
+  #     
+  #     ## no costs for within class movements
+  #     costs[cbind(1:nrow(costs), unlist(sapply(classFlow[,y-1], function(x) which(cls_num==x))))] <- 0
+  #     
+  #     newProb <- psaFlow %>% filter(Age == (psaFlow$Age %>% unique())[y-1])
+  #     
+  #     res <- lpSolve::lp.transport(
+  #          cost.mat  = costs[1:100000,],
+  #          direction = "min",
+  #          row.signs = rep("==", nrow(costs[1:100000,])),
+  #          row.rhs   = rep(1, nrow(costs[1:100000,])),
+  #          col.signs = rep("==", ncol(costs[1:100000,])),
+  #          col.rhs   = c(300, 300, 100, 100, 100, 100, 0)*100) # round(nrow(costs[1:1000,]) * unlist(c(newProb[-c(1,2)]))/100,0))
+  #     
+  #     
+  #   }
+  #   
+  #   
+  #     
+  #   # }
+  # }
   
-  # #### 4.2 Mass Flow
-  # {
-  #   if(!file.exists(glue::glue("{dir_out}/summaryResults/flowPSA.rda")) & check_files) {
-  #     
-  #       load(glue::glue("{dir_out}/psaOvlp/psaOvlp_{ID}.rda"))
-  #       probs <- psaOvlp@overlapp[,,1]
-  #       colnames(probs) <- rownames(probs) <- psaOvlp@lcov
-  #       
-  #       psaLCover_psa <- psaLCover@landcover_ts %>% filter(Dataset_ID==ID)
-  #       if(!all(colnames(probs) %in% glue::glue("LC_{names(psaLCover_psa)[-c(1:2)]}"))) {
-  #         add <- (matrix(0, ncol = ncol(probs), nrow = nrow(psaLCover_psa)) %>%
-  #                   as_tibble() %>% setNames(gsub("LC_","",colnames(probs))))[!colnames(probs) %in% 
-  #                                                                               glue::glue("LC_{names(psaLCover_psa)[-c(1:2)]}")]
-  #         psaLCover_psa <- psaLCover_psa %>% bind_cols(add) %>% 
-  #           dplyr::select(Dataset_ID, Age, gsub("LC_","",colnames(probs)))
-  #       }
-  #       
-  #       psaLCover_psa <- psaLCover_psa %>% filter(!Age == 500)
-  #       
-  #       flowPSA <- lapply(1:(nrow(psaLCover_psa)-1), function(r) {
-  #         
-  #         flow_in <- psaLCover_psa[r:(r+1),]
-  #         
-  #         trans <- transport(flow_in[1,] %>% dplyr::select(gsub("LC_", "", psaOvlp@lcov)) %>% as.numeric()/100, 
-  #                            flow_in[2,] %>% dplyr::select(gsub("LC_", "", psaOvlp@lcov)) %>% as.numeric()/100, 
-  #                            as.matrix(probs), fullreturn = TRUE)
-  #         
-  #         trans$default %>% as_tibble() %>%
-  #           mutate(from = psaOvlp@lcov[from], to = psaOvlp@lcov[to], mass = mass*100) %>%
-  #           mutate(ID = ID, .before = from) %>% mutate(year = flow_in$Age[2], .before = from)
-  #         
-  #       }) %>% Reduce("rbind", .)
-  #       
-  #     save(flowPSA, file = glue::glue("{dir_out}/summaryResults/flowPSA.rda"))
-  #   } else load(glue::glue("{dir_out}/summaryResults/flowPSA.rda"))
-  # }
-  # 
-  # #### 4.5 Pixel Flow
-  # {
-  #    
-  #   load(glue::glue("{dir_out}/summaryResults/flowPSA.rda"))
-  #   load(glue::glue("{dir_out}/summaryResults/initRast.rda"))
-  #   load(glue::glue("{dir_out}/psaOvlp/psaOvlp_{ID}.rda"))
-  #   load(glue::glue("{dir_out}/summaryResults/rdaOut_{ID}.rda"))
-  #   
-  #   classesToMove    <- class_defs %>% mutate(lcov = ifelse(is.na(Merge_To_Class), Class_Code, Merge_To_Class)) %>%
-  #      dplyr::select(Class_Code, lcov, Predicted_In_Past) %>%
-  #      filter(Predicted_In_Past, !duplicated(lcov), lcov<9999) %>% pull(lcov)
-  #   
-  #    ### stars as sf & overlap
-  #    init_sf  <- initRast[1] %>% st_as_sf() %>% st_centroid() %>%
-  #      rowid_to_column(var = 'pxlID') %>% relocate("pxlID", .before = "Landcover") %>%
-  #      filter(Landcover %in% classesToMove)
-  #   
-  #    init_env <- st_extract(env_stars, init_sf) %>% st_as_sf() %>% st_drop_geometry() %>% 
-  #      apply(., 2, function(x) { x[is.na(x)] <- median(x, na.rm = T); x }) %>% suppressMessages() 
-  #    
-  #    ### Lcov - Array
-  #    classFlow <- matrix(nrow = nrow(init_env), ncol = length(flowPSA$year %>% unique())+1)
-  #    classFlow[,1] <- init_sf$Landcover
-  #    
-  #    ### classes
-  #    cls <- st_dimensions(psaOvlp@densities)$attributes$values
-  #    cls_num <- as.numeric(gsub("LC_", "", cls))
-  #    
-  #    ### class density and distance to centers
-  #    dens  <- lapply(1:dim(psaOvlp@densities)[3], function(x) {
-  #      split(psaOvlp@densities)[x,] %>% setNames("densities") %>% mutate(densities = abs(densities - 1))
-  #    }) %>% do.call("c", .) %>% setNames(cls) %>% merge()
-  #    
-  #    dists <- lapply(1:dim(psaOvlp@densities)[3], function(x) {
-  #      tmp <- split(dens)[x,] 
-  #      min <- (tmp %>% st_as_sf() %>% pull(1) %>% which.min())[1]
-  #      tmp %>% mutate(dists = as.numeric(st_distance(tmp %>% st_as_sf(), tmp %>% st_as_sf() %>% slice(min)))*0.5) %>%
-  #        dplyr::select(dists)
-  #    }) %>% do.call("c", .) %>% setNames(cls) %>% merge()
-  #    
-  #    for(y in 2:ncol(classFlow)) {
-  #      
-  #      rda_xy <- as.data.frame(predict(psaOvlp@rda_mod[[1]], 
-  #                                      newdata = lapply(classFlow[,y-1], function(x) as.numeric(x==cls_num)) %>% do.call("rbind", .) %>% 
-  #                                        as.data.frame() %>% setNames(cls) %>% bind_cols(init_env), 
-  #                                      type = "wa", scaling = 1)) %>% dplyr::select("RDA1", "RDA2") %>% st_as_sf(coords = c("RDA1", "RDA2"))
-  #      
-  #      costs  <- abind::abind(as.matrix(st_extract(dens, rda_xy) %>% st_as_sf() %>% st_drop_geometry()),
-  #                             as.matrix(st_extract(dists, rda_xy) %>% st_as_sf() %>% st_drop_geometry()), along = 3) %>%
-  #                  apply(., 1:2, sum, na.rm = T)
-  #      
-  #      ## no costs for within class movements
-  #      costs[cbind(1:nrow(costs), unlist(sapply(classFlow[,y-1], function(x) which(cls_num==x))))] <- 0
-  # 
-  #      
-  #      
-  #      newProb <- psaLCover@landcover_ts %>% filter(Age == (flowPSA$year %>% unique())[y-1])
-  #      colnames(costs)
-  #     
-  # }
-  # 
-  # 
-  # {
-  #   library(tidyverse)
-  #   library(transport)
-  #   
-  #   set.seed(19)
-  #   
-  #   #### Dummy Dataset
-  #   ## classes: 1 - 5
-  #   ## overall cost matrix for transport
-  #   costs <- matrix(expand_grid(a = 1:5, b = 1:5) %>% mutate(cost = abs(b - a)) %>%
-  #                     pull(cost), ncol = 5, nrow =5)
-  #   
-  #   ## dataset with initial classes and individual transport costs into other classes
-  #   dat   <- tibble(class = sample(rep(1:5, each = 1000), 200)) %>%
-  #     bind_cols(t(apply(., 1, function(x) abs(x - 1:5)*runif(5))) %>%
-  #                 as_tibble() %>% setNames(paste0("cl", 1:5)))
-  #   
-  #   
-  #   ## new distribution of classes
-  #   prob1 <- tibble(class = sample(rep(1:5, each = 1000), 200)) %>%
-  #     group_by(class) %>% summarise(p = n()/nrow(dat))
-  #   
-  #   
-  #   m  <- as.matrix(dat[,-1])
-  #   p0 <- prob1[["p"]]
-  #   
-  #   
-  #   res <- lpSolve::lp.transport(
-  #     cost.mat  = m,
-  #     direction = "min",
-  #     row.signs = rep("==", nrow(m)),
-  #     row.rhs   = rep(1, nrow(dat)),
-  #     col.signs = rep("==", ncol(m)),
-  #     col.rhs   = nrow(dat) * p0
-  #   )
-  #   
-  #   res[["objval"]]
-  #   new_groups <- apply(res[["solution"]], 1, function(x) which(x == 1)) # new group for each row
-  #   cbind(dat$class, new_groups)
-  #   
-  #   table(dat[["class"]], new_groups) # change matrix
-  #   
-  #   
-  #   change_rows <- which(new_groups != dat[["class"]])
-  #   if(length(change_rows) > 0)
-  #     changes <- data.frame(
-  #       row = change_rows,
-  #       old_group = dat[["class"]][change_rows],
-  #       new_group = new_groups[change_rows]
-  #     )
-  # }
-  # }
+  
   
 # }
   

@@ -312,7 +312,7 @@ getPxls <- function(geom, scale = 300) {
 
 getLCCfromGEE <- function(ee_dataset, sf_roi, y_max = 500, buffer = 0.5) {
   
-  pxl <- round(round(getPxls(sf_roi)/250000,0)/2,0)
+  pxl <- max(c(1, round(round(getPxls(sf_roi)/250000,0)/2,0)))
   
   psaGrid <- sf_roi %>% st_transform(4326) %>% st_shift_longitude() %>%
     st_make_grid(n=c(pxl,pxl)) %>% st_buffer(buffer) %>% suppressWarnings() %>% suppressMessages()
@@ -633,14 +633,15 @@ plotRDAsummary <- function(ID, dir_out, class_defs) {
   require(patchwork)
   
   load(glue::glue("{dir_out}/psaCrds/psaCrds_{ID}.rda"))
-  load(glue::glue("{dir_out}/psaOvlp/psaOvlp_{ID}.rda"))
+  load(glue::glue("{dir_out}/psaOvlp/psaOvlp.rda"))
   load(glue::glue("{dir_out}/summaryResults/psaVeg.rda"))
   
   colorTab <- class_defs %>% mutate(Merge_To_Class = ifelse(is.na(Merge_To_Class), Class_Code, Merge_To_Class)) %>% 
     filter(!is.na(Merge_To_Class), !duplicated(Merge_To_Class), !is.na(Color_Code)) %>% filter(Merge_To_Class%in%as.numeric(gsub("LC_", "", psaOvlp@lcov)))
   
   pl1 <- ggplot() +
-    geom_sf(data = psaVeg@calibrationMap$geometry %>% st_intersection(psaVeg@psas %>% filter(Dataset_ID==ID) %>% st_buffer(max(psaCrds$dist)*1000))) +
+    geom_sf(data = psaVeg@calibrationMap$geometry %>% st_intersection(psaVeg@psas %>% filter(Dataset_ID==ID) %>% st_buffer(max(psaCrds$dist)*1000*2))) +
+    geom_sf(data = psaVeg@psas %>% filter(Dataset_ID==ID) %>% st_buffer(max(psaCrds$dist)*1000), fill = NA) +
     geom_sf(data = psaVeg@psas %>% filter(Dataset_ID==ID) %>% st_buffer(psaVeg@psas %>% filter(Dataset_ID==ID) %>% pull(2)), mapping = aes(geometry = geometry), fill = NA, color = "red", linewidth = 1, linetype = 2) +
     geom_sf(data = psaVeg@psas %>% filter(Dataset_ID==ID) %>% st_geometry(), mapping = aes(geometry = geometry), fill = NA, color = "red") +  #, linewidth = 1
     geom_sf(data = psaCrds, mapping = aes(geometry = geometry, color = as.factor(lcov)), shape = 16, size = 0.5, show.legend = FALSE) +
