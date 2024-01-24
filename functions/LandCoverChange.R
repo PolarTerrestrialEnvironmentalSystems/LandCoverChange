@@ -296,7 +296,6 @@ modernLC <- function(psaVeg, psaIDs = NULL,
   
 }
 
-
 getPxls <- function(geom, scale = 300) {
   
   bbox <- st_bbox(psaVeg@regionMap)
@@ -316,7 +315,7 @@ getLCCfromGEE <- function(ee_dataset, sf_roi, y_max = 500, buffer = 0.5) {
   
   out_list <- list()
   for(i in 1:length(psaGrid)) {
-    out_list[[i]] <- ee_as_stars(ee_dataset$clip(psaGrid[i] %>% sf_as_ee()), via = 'drive', quiet = TRUE) %>% 
+    out_list[[i]] <- ee_as_stars(ee_dataset$clip(psaGrid[i] %>% sf_as_ee()), via = 'drive', quiet = TRUE, maxPixels = 1e12) %>% 
       st_as_stars() %>% mutate(LandCover_CCI_300.tif = ifelse(LandCover_CCI_300.tif<1, NA, LandCover_CCI_300.tif))
   }
   
