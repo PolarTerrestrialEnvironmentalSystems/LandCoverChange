@@ -52,8 +52,7 @@ metadata_path <- "/Volumes/projects/bioing/data/LandCoverChange/"
 psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hemisphere.csv"), show_col_types = F)
 
 
-# for(rr in 1:nrow(psa_metadata)) {
-rr <- 38
+for(rr in sample(1:nrow(psa_metadata), 10)) {#1:nrow(psa_metadata)) {
   
   cat("\n")
   print(paste0("PSA: ", psa_metadata$Dataset_ID[rr]," (",rr,"/",nrow(psa_metadata),")"))
@@ -96,7 +95,14 @@ rr <- 38
     calibration_buffer  <- 1000            
     
     ## Native resolution = 309.2208 meter, possible options: 300, 3000, 5000, 10000 
-    resolution   <- 300           
+    resolution   <- 300    
+    
+    ## Pixel per class for RDA
+    pxl_extract_PSA        <- 800    # max. points for RDA to search within the PSA   
+    pxl_extract_PSA_buffer <- 50     # min. points for RDA to search in buffer rings if they are not found in the PSA 
+    
+    ## Maximal spatial buffer around PSA
+    max_buffer             <- 1000        # maximum buffer for search
   }
   
   #### 1.3 Create vegetation object for PSA
@@ -124,13 +130,16 @@ rr <- 38
   
   #### 2.1 Modern LandCover share
   {
-    ### modern time threshold for calibration
-    modern_age_threshold <- 1000 
-    
-    modernVegetation <- psaVeg@vegetation %>% filter((Interp & Age <= modern_age_threshold) | Modern) %>%
-      dplyr::select(-c(Interp, Age, Modern)) %>%
-      group_by(Dataset_ID) %>%
-      summarise(across(everything(), function(x) mean(x, na.rm = TRUE))) %>% filter(!apply(., 1, function(x) all(is.nan(x[-1]))))
+    if(!file.exists(glue::glue("{dir_out}/psaEnv/modernVegetation.rda"))) {
+      ### modern time threshold for calibration
+      modern_age_threshold <- 1000 
+      
+      modernVegetation <- psaVeg@vegetation %>% filter((Interp & Age <= modern_age_threshold) | Modern) %>%
+        dplyr::select(-c(Interp, Age, Modern)) %>%
+        group_by(Dataset_ID) %>%
+        summarise(across(everything(), function(x) mean(x, na.rm = TRUE))) %>% filter(!apply(., 1, function(x) all(is.nan(x[-1]))))
+      save(modernVegetation, file = glue::glue("{dir_out}/psaEnv/modernVegetation.rda"))
+    } else load(glue::glue("{dir_out}/psaEnv/modernVegetation.rda"))
     
     class_defs <- readxl::read_excel(glue::glue("{data_dir}/settings/landcover_class_definitions_mod.xlsx")) 
   } ## end 2.1
@@ -162,13 +171,27 @@ rr <- 38
   } ## end 2.2
   
   #### 2.3 Modern LandCover shares in PSA
-  {
-    ## remove classes for calibration that have very little pixels in study area
-    class_defs[class_defs$Include_Class_In_Calibration & is.na(class_defs$Merge_To_Class) & 
-                 class_defs$Class_Code %in% regLCov$Class_Code[regLCov$Percent<0.25], 'Include_Class_In_Calibration'] <- FALSE
+  { 
+    
+    ### Classes present in buffer to use in calibration/prediction
+    roi_maxbuffer = sf_as_ee(psaVeg@psas %>% filter(Dataset_ID==ID) %>% st_buffer(.$'Pollen_Source_Radius [m]' + (max_buffer*1000)) %>% 
+                             st_transform(4326) %>% st_shift_longitude())    
+    
+    classes_buffer  = ee$Image$pixelArea()$addBands(dataset)$reduceRegions(
+      collection = roi_maxbuffer,
+      reducer    = ee$Reducer$count()$frequencyHistogram(),
+      scale      = dataset$projection()$nominalScale()$getInfo()
+    )$getInfo()
+    
+    filterLCover = tibble(Class_Code = as.numeric(names(classes_buffer$features[[1]][[4]][[6]])),
+                               count = unlist(classes_buffer$features[[1]][[4]][[6]])) %>%
+      left_join(class_defs %>% mutate(Merge_To_Class = ifelse(!is.na(Merge_To_Class), Merge_To_Class, Class_Code)) %>%
+                  filter(Include_Class_In_Calibration) %>% dplyr::select(Class_Code, Merge_To_Class), by = 'Class_Code') %>%
+      filter(!is.na(Merge_To_Class)) %>% group_by(Merge_To_Class) %>% summarise(count = sum(count)) %>% filter(count>=pxl_extract_PSA_buffer) %>%
+      rename(Lcov = Merge_To_Class)
     
     if(!file.exists(glue::glue("{dir_out}/summaryResults/lcovShares.rda"))) {
-      lcovShares <- modernLC(psaVeg, psaIDs = unique(modernVegetation$Dataset_ID), class_defs = class_defs, resolution = resolution)
+      lcovShares <- modernLC(psaVeg, psaIDs = unique(modernVegetation$Dataset_ID), class_defs = class_defs, class_keep = filterLCover, resolution = resolution)
       save(lcovShares, file = glue::glue("{dir_out}/summaryResults/lcovShares.rda"))
     } else load(glue::glue("{dir_out}/summaryResults/lcovShares.rda"))
     
@@ -225,16 +248,9 @@ rr <- 38
   
   #### 3.1 Pixel selection
   {
-    
-    pxl_extract_PSA        <- 800    # max. points for RDA to search within the PSA   
-    pxl_extract_PSA_buffer <- 50     # min. points for RDA to search in buffer rings if they are not found in the PSA 
-    
-    max_buffer             <- 1000        # maximum buffer for search
-    method                 <- "getInfo"   # Options "ee_as_sf", "getInfo"
-    
-    if(!file.exists(glue::glue("{dir_out}/psaCrds/psaCrds_{current_psa$Dataset_ID}.rda")) & check_files) {
+    if(!file.exists(glue::glue("{dir_out}/psaCrds/psaCrds.rda")) & check_files) {
       
-      psa      <- psaVeg@psas %>% filter(Dataset_ID==current_psa$Dataset_ID) %>% st_buffer(.$'Pollen_Source_Radius [m]')
+      psa      <- psaVeg@psas %>% filter(Dataset_ID==ID) %>% st_buffer(.$'Pollen_Source_Radius [m]')
       bufferS  <- seq(0, max_buffer*1000, length = 10)
       
       nPxl <- pixelsBuffer(psa, psaLCover@resolution, class_defs, bufferS, cutoff_PSA = pxl_extract_PSA, cutoff_buffer = pxl_extract_PSA_buffer) %>% 
@@ -304,10 +320,10 @@ rr <- 38
       psaCrds_summary <- psaCrds %>% st_drop_geometry() %>% group_by(lcov) %>% summarise(pixel_found = n())
       
       # save pixel summary
-      openxlsx::write.xlsx(psaCrds_summary, file = glue::glue("{dir_out}/summaryResults/psaCrds_summary_{current_psa$Dataset_ID}.xlsx"), asTable = TRUE)
+      openxlsx::write.xlsx(psaCrds_summary, file = glue::glue("{dir_out}/summaryResults/psaCrds_summary.xlsx"), asTable = TRUE)
   
       ### save results
-      save(psaCrds, file = glue::glue("{dir_out}/psaCrds/psaCrds_{current_psa$Dataset_ID}.rda"))
+      save(psaCrds, file = glue::glue("{dir_out}/psaCrds/psaCrds.rda"))
         
     } 
   
@@ -317,9 +333,9 @@ rr <- 38
   {
     threshold <- 0.15 ### 15 percentile of sample size across samples in one PSA
       
-    load(glue::glue("{dir_out}/psaCrds/psaCrds_{ID}.rda"))
+    load(glue::glue("{dir_out}/psaCrds/psaCrds.rda"))
       
-      if(!file.exists(glue::glue("{dir_out}/psaEnv/psaEnv_{ID}.rda")) & check_files) {
+      if(!file.exists(glue::glue("{dir_out}/psaEnv/psaEnv.rda")) & check_files) {
         
         clim_variables <- read_xlsx(glue::glue("{data_dir}/settings/bioclim_vars_definitions.xlsx"))
         clim_dir       <- list.files(glue::glue("{data_dir}/data/global_maps"), pattern = "*.tif", full.names = T)
@@ -367,8 +383,8 @@ rr <- 38
         }) %>% Reduce("cbind",.) %>% setNames(names(psaEnv_init))
         
         
-        save(psaEnv, file = glue::glue("{dir_out}/psaEnv/psaEnv_{ID}.rda"))
-        save(z_tranTab, file = glue::glue("{dir_out}/psaEnv/z_tranTab_{ID}.rda"))
+        save(psaEnv, file = glue::glue("{dir_out}/psaEnv/psaEnv.rda"))
+        save(z_tranTab, file = glue::glue("{dir_out}/psaEnv/z_tranTab.rda"))
       }
     } ## end 3.2
     
@@ -380,8 +396,8 @@ rr <- 38
     
     if(!file.exists(glue::glue("{dir_out}/psaOvlp/psaOvlp.rda")) & check_files) {
         
-        load(glue::glue("{dir_out}/psaCrds/psaCrds_{ID}.rda")) ## psaCrds
-        load(glue::glue("{dir_out}/psaEnv/psaEnv_{ID}.rda"))   ## psaEnv
+        load(glue::glue("{dir_out}/psaCrds/psaCrds.rda")) ## psaCrds
+        load(glue::glue("{dir_out}/psaEnv/psaEnv.rda"))   ## psaEnv
         
         datst <- psaCrds %>% st_drop_geometry() %>% dplyr::select(-Dataset_ID) %>%
           bind_cols(psaEnv) %>% mutate(lcov = as.factor(lcov))
@@ -426,7 +442,7 @@ rr <- 38
   {
 
     ## load(z-trans variables)
-    load(glue::glue("{dir_out}/psaEnv/z_tranTab_{ID}.rda"))
+    load(glue::glue("{dir_out}/psaEnv/z_tranTab.rda"))
       
     ## Climate maps
     clim_variables <- read_xlsx(glue::glue("{data_dir}/settings/bioclim_vars_definitions.xlsx"))
@@ -457,7 +473,6 @@ rr <- 38
           mutate(Landcover = mergeTab$lcov[match(Landcover, mergeTab$Class_Code)]) %>%
           mutate(predict = mergeTab$Predicted_In_Past[match(Landcover, mergeTab$lcov)])
     
-      
       
       ### Class transfer
       {
@@ -518,21 +533,22 @@ rr <- 38
   # {
   #   # if(!file.exists(glue::glue("{dir_out}/summaryResults/flowPSA.rda")) & check_files) {
   #     
-    load(glue::glue("{dir_out}/summaryResults/initRast.rda"))
-    load(glue::glue("{dir_out}/summaryResults/rdaOut.rda"))
-    load(glue::glue("{dir_out}/psaOvlp/psaOvlp.rda"))
-
-    psaFlow <- psaLCover@landcover_ts %>% filter(Dataset_ID==ID, Age>500) %>%
-      group_split(Age) %>% #lapply(., function(x) x %>% dplyr::select(Dataset_ID, Age, gsub("LC_", "", psaOvlp@lcov))) %>%
-      Reduce("rbind", .)
-  #     
-  #   classesToMove    <- as.numeric(names(psaFlow)[-c(1:2)])
+  #  load(glue::glue("{dir_out}/summaryResults/initRast.rda"))
+  #  load(glue::glue("{dir_out}/summaryResults/rdaOut.rda"))
+  #  load(glue::glue("{dir_out}/psaOvlp/psaOvlp.rda"))
+  # 
+  #  psaFlow <- psaLCover@landcover_ts %>% filter(Dataset_ID==ID, Age>500) %>%
+  #    group_split(Age) %>% #lapply(., function(x) x %>% dplyr::select(Dataset_ID, Age, gsub("LC_", "", psaOvlp@lcov))) %>%
+  #    Reduce("rbind", .)
   #   
-  #   ### stars as sf & environment   
-  #   init_sf  <- initRast[1] %>% st_as_sf(na.rm = F) %>% st_centroid() %>%
-  #         rowid_to_column(var = 'pxlID') %>% relocate("pxlID", .before = "Landcover") %>%
-  #         filter(Landcover %in% classesToMove) %>% suppressWarnings()
-  #   
+  # ### stars as sf & environment
+  # init_sf  <- initRast[1] %>% st_as_sf(na.rm = F) %>% st_centroid() %>%
+  #       rowid_to_column(var = 'pxlID') %>% relocate("pxlID", .before = "Landcover") %>%
+  #       filter(Landcover %in% as.numeric(names(psaFlow)[-c(1:2)])) %>% suppressWarnings()
+  # 
+  # classesToMove <- init_sf %>% pull(Landcover) %>% unique() %>% sort()
+  # 
+  # 
   #   init_env <- st_extract(env_stars, init_sf) %>% st_as_sf() %>% st_drop_geometry() %>% 
   #         apply(., 2, function(x) { x[is.na(x)] <- median(x, na.rm = T); x }) %>% suppressMessages() 
   #   
@@ -601,8 +617,6 @@ rr <- 38
   #   # }
   # }
   
-  
-  
-# }
+}
   
   

@@ -245,7 +245,7 @@ plotVegSite = function(psaVeg,
 }
 
 modernLC <- function(psaVeg, psaIDs = NULL, 
-                     class_defs, resolution = 309.2208, percent = TRUE) {
+                     class_defs, class_keep, resolution = 309.2208, percent = TRUE) {
   
   if(is.null(psaIDs)) {
     psaIDs <- psaVeg@psas$Dataset_ID
@@ -277,13 +277,10 @@ modernLC <- function(psaVeg, psaIDs = NULL,
       
       
       ## merge and filter
-      
-      suppressMessages({
-      out <- regLCov %>% filter(lcov %in% class_defs$Class_Code[class_defs$Include_Class_In_Calibration]) %>%
-        left_join(tibble(lcov = as.factor(class_defs$Class_Code),
-                         out_class = as.factor(ifelse(is.na(class_defs$Merge_To_Class), class_defs$Class_Code, class_defs$Merge_To_Class))), by = "lcov") %>%
+      out <- left_join(regLCov, tibble(lcov      = as.factor(class_defs$Class_Code),
+                                       out_class = as.factor(ifelse(is.na(class_defs$Merge_To_Class), class_defs$Class_Code, class_defs$Merge_To_Class))), by = "lcov") %>%
         group_by(id, out_class) %>% summarise(count = sum(count)) %>% rename(Dataset_ID = id, lcov = out_class) %>%
-        group_by(Dataset_ID) %>% mutate(perc = (count/sum(count, na.rm = T))*100)})
+        group_by(Dataset_ID) %>% mutate(perc = (count/sum(count, na.rm = T))*100) %>% unnest(cols = "Dataset_ID") %>% filter(lcov %in% class_keep$Lcov) %>% suppressMessages()
       
       if(percent) {
       out <- out %>% dplyr::select(-count) %>%
@@ -360,15 +357,13 @@ pixelsBuffer <- function(psa, resolution, class_defs, bufferS, cutoff_PSA = 2500
     })
     
     mergeTab <- class_defs %>% dplyr::select(Class_Code, Merge_To_Class, Predicted_In_Past) %>%
-      filter(!is.na(Merge_To_Class) & Predicted_In_Past) %>% mutate(Class_Code = as.factor(Class_Code))
+      mutate(Merge_To_Class = ifelse(is.na(Merge_To_Class), Class_Code, Merge_To_Class)) %>%
+      filter(Predicted_In_Past, Merge_To_Class<1000) %>% mutate(Class_Code = as.factor(Class_Code))
     
     
     for(r in 1:length(buffer)) {
       
       roi <- buffer[[r]] %>% st_geometry() %>% sf_as_ee()
-      
-      # Map$addLayer(center %>% sf_as_ee(), {}, "center") +
-      # Map$addLayer(roi, {}, "center")
       
       # extract number of pixel per class
       class_areas  = ee$Image$pixelArea()$addBands(dataset)$reduceRegions(
@@ -632,7 +627,7 @@ plotRDAsummary <- function(ID, dir_out, class_defs) {
   
   require(patchwork)
   
-  load(glue::glue("{dir_out}/psaCrds/psaCrds_{ID}.rda"))
+  load(glue::glue("{dir_out}/psaCrds/psaCrds.rda"))
   load(glue::glue("{dir_out}/psaOvlp/psaOvlp.rda"))
   load(glue::glue("{dir_out}/summaryResults/psaVeg.rda"))
   
