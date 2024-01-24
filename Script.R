@@ -191,7 +191,9 @@ for(rr in sample(1:nrow(psa_metadata), 10)) {#1:nrow(psa_metadata)) {
       rename(Lcov = Merge_To_Class)
     
     if(!file.exists(glue::glue("{dir_out}/summaryResults/lcovShares.rda"))) {
-      lcovShares <- modernLC(psaVeg, psaIDs = unique(modernVegetation$Dataset_ID), class_defs = class_defs, class_keep = filterLCover, resolution = resolution)
+      lcovShares <- modernLC(psaVeg, psaIDs = unique(modernVegetation$Dataset_ID), 
+                             class_defs = class_defs, 
+                             class_keep = filterLCover, resolution = resolution)
       save(lcovShares, file = glue::glue("{dir_out}/summaryResults/lcovShares.rda"))
     } else load(glue::glue("{dir_out}/summaryResults/lcovShares.rda"))
     

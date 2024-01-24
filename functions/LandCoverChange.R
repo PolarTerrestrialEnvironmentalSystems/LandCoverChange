@@ -251,49 +251,44 @@ modernLC <- function(psaVeg, psaIDs = NULL,
     psaIDs <- psaVeg@psas$Dataset_ID
   }
   
-  if(suppressMessages(ee_check(quiet = TRUE))) {
+  if(length(psaIDs)>1000) psaIDs_sub <- split(psaIDs, c(rep(1, (length(psaIDs)/2)+1), rep(2, length(psaIDs) - (length(psaIDs)/2)))) else psaIDs_sub <- list(psaIDs)
       
-      roi     = sf_as_ee(psaVeg@psas %>% st_buffer(psaVeg@psas$`Pollen_Source_Radius [m]`) %>% filter(Dataset_ID %in% psaIDs) %>% st_transform(4326) %>% st_shift_longitude())
-      dataset = ee$Image(glue::glue("users/slisovski/LandCoverChange/LandCover_CCI_{resolution}"))
-      
-      # extract number of pixel per class
-      class_areas  = ee$Image$pixelArea()$addBands(dataset)$reduceRegions(
-        collection = roi,
-        reducer    = ee$Reducer$count()$group(groupField = 1),
-        scale      = dataset$projection()$nominalScale()$getInfo()
-      )$getInfo()
-      
-      regLCov = lapply(class_areas$features, function(x) {
-        lapply(x[[4]][[5]], function(y) tibble(id   = x[[4]][[1]], 
-                                     lcov  = as.factor(as.numeric(y$group)), 
-                                     count = y$count)) %>% bind_rows() 
-      }) %>% do.call("rbind",.)
-      
-      # regLCov = lapply(class_areas$features, function(x) {
-      #   lapply(x[[4]][[5]], function(y) tibble(id   = x[[4]][[1]], 
-      #                                          lcov  = as.factor(as.numeric(y$group)), 
-      #                                          count = y$count)) %>% bind_rows() 
-      # }) %>% do.call("rbind",.)
-      
-      
-      ## merge and filter
-      out <- left_join(regLCov, tibble(lcov      = as.factor(class_defs$Class_Code),
-                                       out_class = as.factor(ifelse(is.na(class_defs$Merge_To_Class), class_defs$Class_Code, class_defs$Merge_To_Class))), by = "lcov") %>%
-        group_by(id, out_class) %>% summarise(count = sum(count)) %>% rename(Dataset_ID = id, lcov = out_class) %>%
-        group_by(Dataset_ID) %>% mutate(perc = (count/sum(count, na.rm = T))*100) %>% unnest(cols = "Dataset_ID") %>% filter(lcov %in% class_keep$Lcov) %>% suppressMessages()
-      
-      if(percent) {
-      out <- out %>% dplyr::select(-count) %>%
-        pivot_wider(names_from = lcov, values_from = perc, values_fill = 0) %>% ungroup()
-      } else {
-        out <- out %>% dplyr::select(-perc) %>%
-          pivot_wider(names_from = lcov, values_from = count, values_fill = 0) %>% ungroup()
-      }
-      
-      out[,c(1, order(as.numeric(names(out)[-1]), decreasing = F)+1)] 
-      
-    } else stop("rgee not (correctly) configured. Fix or use GEE = FALSE instead.")
-  
+      tt <- lapply(1:length(psaIDs_sub), function(x) {
+        
+        roi     = sf_as_ee(psaVeg@psas %>% st_buffer(psaVeg@psas$`Pollen_Source_Radius [m]`) %>% filter(Dataset_ID %in% psaIDs_sub[[x]]) %>% st_transform(4326) %>% st_shift_longitude())
+        dataset = ee$Image(glue::glue("users/slisovski/LandCoverChange/LandCover_CCI_{resolution}"))
+        
+        # extract number of pixel per class
+        class_areas  = ee$Image$pixelArea()$addBands(dataset)$reduceRegions(
+          collection = roi,
+          reducer    = ee$Reducer$count()$group(groupField = 1),
+          scale      = dataset$projection()$nominalScale()$getInfo()
+        )$getInfo()
+        
+        regLCov = lapply(class_areas$features, function(x) {
+          lapply(x[[4]][[5]], function(y) tibble(id   = x[[4]][[1]], 
+                                       lcov  = as.factor(as.numeric(y$group)), 
+                                       count = y$count)) %>% bind_rows() 
+        }) %>% do.call("rbind",.)
+        
+        ## merge and filter
+        out <- left_join(regLCov, tibble(lcov      = as.factor(class_defs$Class_Code),
+                                         out_class = as.factor(ifelse(is.na(class_defs$Merge_To_Class), class_defs$Class_Code, class_defs$Merge_To_Class))), by = "lcov") %>%
+          group_by(id, out_class) %>% summarise(count = sum(count)) %>% rename(Dataset_ID = id, lcov = out_class) %>%
+          group_by(Dataset_ID) %>% mutate(perc = (count/sum(count, na.rm = T))*100) %>% unnest(cols = "Dataset_ID") %>% filter(lcov %in% class_keep$Lcov) %>% suppressMessages()
+        
+        if(percent) {
+        out <- out %>% dplyr::select(-count) %>%
+          pivot_wider(names_from = lcov, values_from = perc, values_fill = 0) %>% ungroup()
+        } else {
+          out <- out %>% dplyr::select(-perc) %>%
+            pivot_wider(names_from = lcov, values_from = count, values_fill = 0) %>% ungroup()
+        }
+        
+        out[,c(1, order(as.numeric(names(out)[-1]), decreasing = F)+1)] %>% pivot_longer(cols = -Dataset_ID)
+        
+        
+    }) %>% Reduce("rbind",.) %>% pivot_wider(names_from = name, values_fill = 0)
 }
 
 getPxls <- function(geom, scale = 300) {
