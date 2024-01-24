@@ -52,8 +52,9 @@ metadata_path <- "/Volumes/projects/bioing/data/LandCoverChange/"
 psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hemisphere.csv"), show_col_types = F)
 
 
-for(rr in sample(1:nrow(psa_metadata), 10)) {#1:nrow(psa_metadata)) {
-  
+for(rr in sample(1:nrow(psa_metadata[psa_metadata$Dataset_ID<10000,]), 10)) {#1:nrow(psa_metadata)) {
+rr <- which(psa_metadata$Dataset_ID==1854)
+    
   cat("\n")
   print(paste0("PSA: ", psa_metadata$Dataset_ID[rr]," (",rr,"/",nrow(psa_metadata),")"))
   
@@ -252,11 +253,13 @@ for(rr in sample(1:nrow(psa_metadata), 10)) {#1:nrow(psa_metadata)) {
   {
     if(!file.exists(glue::glue("{dir_out}/psaCrds/psaCrds.rda")) & check_files) {
       
+      ## filterLCover
+      
       psa      <- psaVeg@psas %>% filter(Dataset_ID==ID) %>% st_buffer(.$'Pollen_Source_Radius [m]')
       bufferS  <- seq(0, max_buffer*1000, length = 10)
       
       nPxl <- pixelsBuffer(psa, psaLCover@resolution, class_defs, bufferS, cutoff_PSA = pxl_extract_PSA, cutoff_buffer = pxl_extract_PSA_buffer) %>% 
-        group_split(lcov) %>% lapply(., function(x) {
+        filter(lcov%in%filterLCover$Lcov) %>% group_split(lcov) %>% lapply(., function(x) {
         if(x %>% filter(radius==0) %>% pull(count) >  pxl_extract_PSA) {
           x %>% filter(radius==0) %>% mutate(cumsum = count)
         } else {
