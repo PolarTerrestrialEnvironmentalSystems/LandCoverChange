@@ -53,7 +53,7 @@ psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hem
 
 
 # for(rr in sample(1:nrow(psa_metadata[psa_metadata$Dataset_ID<10000,]), 10)) {#1:nrow(psa_metadata)) {
-rr <- which(psa_metadata$Dataset_ID==2643)
+rr <- which(psa_metadata$Dataset_ID==1987)
     
   cat("\n")
   print(paste0("PSA: ", psa_metadata$Dataset_ID[rr]," (",rr,"/",nrow(psa_metadata),")"))
@@ -92,6 +92,9 @@ rr <- which(psa_metadata$Dataset_ID==2643)
     ## radius PSA [m]
     radius <- current_psa %>% pull(Pollen_Source_Radius)
     
+    ## Trim PSAs if larger PSAmax [km]
+    PSAmax <- 250 
+    
     ## buffer to include PSAs for calibration [km]
     calibration_buffer  <- 1000            
     
@@ -110,7 +113,7 @@ rr <- which(psa_metadata$Dataset_ID==2643)
   {
     # load data, filter pollen source areas in region and/or calibration subset
     if(!file.exists(glue::glue("{dir_out}/summaryResults/psaVeg.rda")) & check_files) {
-      psaVeg <- make_psaVeg(psa, radius, calibration_buffer, resolution, proj = "laea",
+      psaVeg <- make_psaVeg(ID, psa, radius, calibration_buffer, resolution, PSAmax, proj = "laea",
                             veg_folder = file.path(data_dir, "data", "vegetation_cover"), 
                             fc = 1/500, dt = 500, k = 5, nrCores = 9)
       save(psaVeg, file = glue::glue("{dir_out}/summaryResults/psaVeg.rda"))

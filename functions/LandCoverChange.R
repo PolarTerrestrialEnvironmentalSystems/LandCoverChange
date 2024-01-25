@@ -42,7 +42,7 @@ setMethod("plot", "psaVeg", function(x) {
 })
 
 
-make_psaVeg <- function(psa, radius, buffer, resolution, proj = "laea",
+make_psaVeg <- function(ID, psa, radius, buffer, resolution, PSAmax, proj = "laea",
                         veg_folder, 
                         interpolate = TRUE, 
                         fc = 1/500, dt = 500, k = 5, nrCores = NULL, silent = TRUE) {
@@ -78,6 +78,7 @@ make_psaVeg <- function(psa, radius, buffer, resolution, proj = "laea",
   # filter PSAs in buffer region
   psas = meta_data %>% sf::st_as_sf(coords = c("Longitude", "Latitude")) %>% sf::st_set_crs(4326) %>% 
     st_transform(st_crs(psa_sf)) %>% st_intersection(psa_sf %>% st_buffer(buffer*1000)) %>% suppressMessages() %>% suppressWarnings()
+  psas$`Pollen_Source_Radius [m]`[psas$Dataset_ID==ID] <- min(c(PSAmax*1000, psas$`Pollen_Source_Radius [m]`[psas$Dataset_ID==ID] ))
   
   
   # filter vegetation data based on selected pollen source areas, drop taxa not present, and normalize rows to 1
@@ -114,7 +115,7 @@ make_psaVeg <- function(psa, radius, buffer, resolution, proj = "laea",
     # reorder columns
     veg_cover_filtered = veg_cover_filtered[,c(meta_cols_veg[meta_cols_veg %in% colnames(veg_cover_filtered)], 
                                                colnames(veg_cover_filtered)[!(colnames(veg_cover_filtered) %in% meta_cols_veg)])] %>%
-      dplyr::select(-which(apply(veg_cover_filtered, 2, sum)==0))
+      dplyr::select(-(which(apply(veg_cover_filtered[,-c(1:3)], 2, sum)==0)+3))
     veg_cover_filtered[,-c(1,2,3)] <- t(apply(veg_cover_filtered[,-c(1,2, 3)],  1, function(u) u/sum(u)))
     
   }
@@ -130,8 +131,9 @@ make_psaVeg <- function(psa, radius, buffer, resolution, proj = "laea",
     rnaturalearth::ne_countries(scale = "medium", returnclass = "sf") %>%
       dplyr::select("sovereignt") %>% st_transform(psa_sf %>% st_crs()) %>% st_make_valid()
   )
-  region_map <- map %>% st_intersection(psa_sf) %>% st_geometry() %>% st_cast("MULTIPOLYGON")
-  calibration_map <- map %>% st_intersection(psa_sf %>% st_buffer(buffer*1000) %>% st_bbox() %>% st_as_sfc(crs = st_crs(region_map)))
+  region_map <- psa %>% st_transform(st_crs(map)) %>% st_buffer(psas$`Pollen_Source_Radius [m]`[psas$Dataset_ID==ID]) %>% 
+    st_geometry() %>% st_cast("MULTIPOLYGON")
+  calibration_map <- map %>% st_intersection(psa_sf %>% st_buffer(buffer*1000) %>% st_bbox() %>% st_as_sfc(crs = st_crs(region_map))) %>% suppressWarnings()
 
   
   new(
