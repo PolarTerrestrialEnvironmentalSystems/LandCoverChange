@@ -570,21 +570,27 @@ rr <- which(psa_metadata$Dataset_ID==1987)
         scaling = 1
       )) %>% dplyr::select("RDA1", "RDA2") %>% st_as_sf(coords = c("RDA1", "RDA2"))
     
+    ggplot() +
+      geom_sf(data = init_rda) +
+      geom_sf(data = psaOvlp@densities %>% st_bbox() %>% st_as_sfc())
+    
     init_ovlp <- init_rda %>%
       st_extract(lapply(1:dim(psaOvlp@densities)[3], function(x) {
                     split(psaOvlp@densities)[x,] %>% setNames("densities") %>% mutate(densities = abs(densities - 1))
                     }) %>% do.call("c", .) %>% setNames(lcovs) %>% merge(), .) %>% st_as_sf() %>% st_drop_geometry()
-
-    init_dist <- init_rda %>%
-      st_extract(lapply(1:dim(psaOvlp@densities)[3], function(x) {
-        tmp <- split(psaOvlp@densities)[x]
-        min <- tmp %>% st_as_sf() %>% pull(1) %>% which.min()
-        tmp %>% mutate(dists = as.numeric(st_distance(tmp %>% st_as_sf(), tmp %>% st_as_sf() %>% slice(min)))) %>%
-          dplyr::select(dists)
-      }) %>% do.call("c", .) %>% setNames(lcovs) %>% merge(), .) %>% st_as_sf() %>% st_drop_geometry()
     
-     classFlow <- matrix(nrow = nrow(init_env), ncol = length(psaFlow$Age %>% unique())+1)
-     classFlow[,1] <- init_crds$Landcover
+    distCentre <- lapply(1:dim(psaOvlp@densities)[3], function(x) {
+          tmp <- split(psaOvlp@densities)[x]
+          min <- tmp %>% st_as_sf() %>% pull(1) %>% which.max()
+          tmp %>% st_as_sf() %>% slice(min) %>% st_centroid() %>% st_geometry() %>% suppressWarnings()
+        })
+    
+    init_dist <- distCentre %>% lapply(., function(x) {
+      as.numeric(st_distance(init_rda, x))
+    }) %>% Reduce("cbind", .) %>% as_tibble() %>% setNames(names(init_ovlp))
+    
+    classFlow <- matrix(nrow = nrow(init_env), ncol = length(psaFlow$Age %>% unique())+1)
+    classFlow[,1] <- init_crds$Landcover
      
      #### start FLOW ####
      for(y in 2:ncol(classFlow)) {
@@ -596,7 +602,7 @@ rr <- which(psa_metadata$Dataset_ID==1987)
        # costs <- abind::abind(init_ovlp %>% as.matrix(), init_dist %>% as.matrix(), along = 3) %>% 
        #                  apply(., 1:2, sum, na.rm = T)
        costs <- init_dist %>% as.matrix()
-       costs[is.na(costs)] <- max(costs)
+       # costs[is.na(costs)] <- max(costs)
        
        old_p <- ((tibble(lcov = classFlow[,y-1]) %>% group_by(lcov) %>% summarize(p = n()) %>%
          right_join(tibble(lcov = lcovs_num), by = "lcov", ) %>% mutate(p = ifelse(is.na(p), 0, p)) %>%
