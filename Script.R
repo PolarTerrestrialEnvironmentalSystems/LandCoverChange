@@ -52,7 +52,7 @@ metadata_path <- "/Volumes/projects/bioing/data/LandCoverChange/"
 psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hemisphere.csv"), show_col_types = F)
 
 
-# for(rr in sample(1:nrow(psa_metadata[psa_metadata$Dataset_ID<10000,]), 10)) {#1:nrow(psa_metadata)) {
+# for(rr in 1:nrow(psa_metadata)) {
 rr <- which(psa_metadata$Dataset_ID==1987)
     
   cat("\n")
@@ -593,8 +593,9 @@ rr <- which(psa_metadata$Dataset_ID==1987)
        cat(sprintf("%6d",y))
        flush.console()
        
-       costs <- abind::abind(init_ovlp %>% as.matrix(), init_dist %>% as.matrix(), along = 3) %>% 
-                        apply(., 1:2, sum, na.rm = T)
+       # costs <- abind::abind(init_ovlp %>% as.matrix(), init_dist %>% as.matrix(), along = 3) %>% 
+       #                  apply(., 1:2, sum, na.rm = T)
+       costs <- init_dist %>% as.matrix()
        costs[costs==0] <- max(costs)
        
        old_p <- ((tibble(lcov = classFlow[,y-1]) %>% group_by(lcov) %>% summarize(p = n()) %>%
@@ -618,33 +619,35 @@ rr <- which(psa_metadata$Dataset_ID==1987)
        index_change <- parallel::mclapply(flow, function(x) {
           
           if(nrow(x)==1) {
+            
             tibble(index = 1:nrow(costs)) %>% bind_cols(costs) %>% filter(classFlow[,y-1]==as.numeric(x[1])) %>%
                 dplyr::select('index', lcovs[which(lcovs_num==as.numeric(x[1]))], lcovs[which(lcovs_num==as.numeric(x[2]))]) %>% 
                 setNames(c("index", "from", "to")) %>% arrange(to) %>% slice(1:as.numeric(x[4])) %>% mutate(newClass = as.numeric(x[2])) %>%
                 dplyr::select(index, newClass)
+            
           } else {
             
             cost_sub <- tibble(index = 1:nrow(costs)) %>% bind_cols(costs) %>% filter(classFlow[,y-1]==unique(x %>% pull(from))) %>%
-              dplyr::select(index, lcovs[lcovs_num%in%(x %>% pull(from))], lcovs[lcovs_num%in%(x %>% pull(to))])
-            cost_sub[,2] <- min(cost_sub, na.rm = T)*0.5
+              dplyr::select(index, lcovs[lcovs_num%in%(x %>% pull(to))]) %>%
+              arrange(apply(.[,-1], 1, sum)) %>% slice(1:sum(c(x %>% pull(nrPxl))))
             
-            res <- lpSolve::lp.transport(
-              cost.mat  = as.matrix(cost_sub[,-1]),
-              direction = "min",
-              row.signs = rep("==", nrow(cost_sub)),
-              row.rhs   = rep(1, nrow(cost_sub)),
-              col.signs = rep("==", ncol(cost_sub[,-1])),
-              col.rhs   = c(nrow(cost_sub) - sum(x %>% pull(nrPxl)), x %>% pull(nrPxl)))
-            
-            
-            cost_sub %>% dplyr::select(index) %>%
-              mutate(newClass = lcovs_num[match(names(cost_sub[,-1]), lcovs)][apply(res[["solution"]], 1, function(y) which(y == 1))])
-
+             
+              res <- lpSolve::lp.transport(
+                cost.mat  = as.matrix(cost_sub[,-1]),
+                direction = "min",
+                row.signs = rep("==", nrow(cost_sub)),
+                row.rhs   = rep(1, nrow(cost_sub)),
+                col.signs = rep("==", ncol(cost_sub[,-1])),
+                col.rhs   = c(x %>% pull(nrPxl)))
+              
+              cost_sub %>% dplyr::select(index) %>%
+                mutate(newClass = lcovs_num[match(names(cost_sub[,-1]), lcovs)][apply(res[["solution"]], 1, function(y) which(y == 1))])
           }
+          
        }, mc.cores = length(flow)) %>% Reduce("rbind", .)
       
-       classFlow[,y] <- classFlow[,y-1]  
-       classFlow[index_change %>% pull(index),y] <- index_change %>% pull(newClass)
+      classFlow[,y] <- classFlow[,y-1]  
+      classFlow[index_change %>% pull(index),y] <- index_change %>% pull(newClass)
       
      }
      #### end   FLOW #### 
@@ -695,16 +698,18 @@ rr <- which(psa_metadata$Dataset_ID==1987)
       save(changeMap, file = glue::glue("{dir_out}/psaChange/changeMap.rda"))
     } 
     
-    # ggplot() +
-    #   geom_stars(data = LcovOut[,,,1:10], mapping = aes(fill = as.factor(LandcoverChange))) +
-    #   facet_wrap(~attributes) +
-    #   scale_fill_manual(values = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(Color_Code),
-    #                     breaks = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(lcov),
-    #                     labels = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(Class_Plotlabel), name = "Landcover") +
-    #   theme_void()
+    mergeTab    <- class_defs %>% mutate(lcov = ifelse(is.na(Merge_To_Class), Class_Code, Merge_To_Class)) %>%
+      dplyr::select(Class_Code, lcov, Class_Plotlabel, Predicted_In_Past, Color_Code, Transfer)
+    
+    ggplot() +
+      geom_stars(data = LcovOut[,,,1:10], mapping = aes(fill = as.factor(LandcoverChange))) +
+      facet_wrap(~attributes) +
+      scale_fill_manual(values = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(Color_Code),
+                        breaks = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(lcov),
+                        labels = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(Class_Plotlabel), name = "Landcover") +
+      theme_void()
 
   }
-  
   
 # }
   
