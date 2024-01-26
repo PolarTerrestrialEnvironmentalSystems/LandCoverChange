@@ -596,7 +596,7 @@ rr <- which(psa_metadata$Dataset_ID==1987)
        # costs <- abind::abind(init_ovlp %>% as.matrix(), init_dist %>% as.matrix(), along = 3) %>% 
        #                  apply(., 1:2, sum, na.rm = T)
        costs <- init_dist %>% as.matrix()
-       costs[costs==0] <- max(costs)
+       costs[is.na(costs)] <- max(costs)
        
        old_p <- ((tibble(lcov = classFlow[,y-1]) %>% group_by(lcov) %>% summarize(p = n()) %>%
          right_join(tibble(lcov = lcovs_num), by = "lcov", ) %>% mutate(p = ifelse(is.na(p), 0, p)) %>%
