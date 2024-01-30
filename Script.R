@@ -53,7 +53,7 @@ psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hem
 
 
 # for(rr in 1:nrow(psa_metadata)) {
-rr <- which(psa_metadata$Dataset_ID==7)
+rr <- which(psa_metadata$Dataset_ID==15814)
     
   cat("\n")
   print(paste0("PSA: ", psa_metadata$Dataset_ID[rr]," (",rr,"/",nrow(psa_metadata),")"))
@@ -370,9 +370,9 @@ rr <- which(psa_metadata$Dataset_ID==7)
           
           
         ## Landcover Classes for transformation
-        class_z  <- class_defs %>% filter(Include_Class_In_Calibration | Transfer) %>% pull(Class_Code) 
-        envClass <- tibble(lcov = st_extract(dataset_rast, st_as_sf(st_coordinates(clim_stars[[1]]), coords = c("x", "y"), crs = 4326)) %>% pull(1)) %>%
-          mutate(zTrans = !is.na(lcov) & lcov %in% class_z)
+        # class_z  <- class_defs %>% filter(Include_Class_In_Calibration | Transfer) %>% pull(Class_Code) 
+        # envClass <- tibble(lcov = st_extract(dataset_rast, st_as_sf(st_coordinates(clim_stars[[1]]), coords = c("x", "y"), crs = 4326)) %>% pull(1)) %>%
+        #   mutate(zTrans = !is.na(lcov) & lcov %in% class_z)
         
         ## z transformation table
         z_tranTab <- lapply(1:ncol(psaEnv_init), function(x) {
@@ -391,7 +391,8 @@ rr <- which(psa_metadata$Dataset_ID==7)
         ## apply z transformation to environment
         env_stars <- lapply(1:nrow(z_tranTab), function(x) {
           append(clim_stars, list(elev_stars))[[x]] %>% setNames("var") %>%
-            mutate(var = scale(var, z_tranTab[x,2], z_tranTab[x,3]))
+            mutate(var = scale(var, z_tranTab[x,2], z_tranTab[x,3]),
+                   var = ifelse(is.na(var), 0, var))
         }) %>% do.call("c", .) %>% setNames(z_tranTab$Var_Name) %>% merge()
   
         save(env_stars, file = glue::glue("{dir_out}/psaEnv/env_stars.rda"))
@@ -558,7 +559,6 @@ rr <- which(psa_metadata$Dataset_ID==7)
 
     init_env <- st_extract(env_stars, init_crds) %>% st_as_sf() %>% st_drop_geometry() %>%
           apply(., 2, function(x) { x[is.na(x)] <- median(x, na.rm = T); x }) %>% suppressMessages()
-    
     
     init_rda <- as.data.frame(
       predict(
