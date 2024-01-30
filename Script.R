@@ -53,7 +53,7 @@ psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hem
 
 
 # for(rr in 1:nrow(psa_metadata)) {
-rr <- which(psa_metadata$Dataset_ID==1987)
+rr <- which(psa_metadata$Dataset_ID==7)
     
   cat("\n")
   print(paste0("PSA: ", psa_metadata$Dataset_ID[rr]," (",rr,"/",nrow(psa_metadata),")"))
@@ -345,42 +345,40 @@ rr <- which(psa_metadata$Dataset_ID==1987)
       
       if(!file.exists(glue::glue("{dir_out}/psaEnv/psaEnv.rda")) & check_files) {
         
+        ## Climate maps
         clim_variables <- read_xlsx(glue::glue("{data_dir}/settings/bioclim_vars_definitions.xlsx"))
         clim_dir       <- list.files(glue::glue("{data_dir}/data/global_maps"), pattern = "*.tif", full.names = T)
-      
+        
         clim_stars <- lapply(clim_variables$Var_Name, function(x) {
           ind <- which(sapply(clim_dir, function(y) grepl(glue::glue("_{x}_"), y, fixed = T)))
-          read_stars(clim_dir[ind]) %>% setNames(x)
+          read_stars(clim_dir[ind]) %>% setNames(x) %>% st_crop(psaVeg@regionMap %>% st_buffer(500) %>% st_transform(4326)) %>% st_as_stars() %>% suppressMessages()
         })
         
+        elev_stars <- read_stars(clim_dir[grepl("ETOPO", clim_dir)]) %>% st_set_crs(4326)  %>%
+          st_warp(., clim_stars[[1]], use_gdal = F, method = "near") %>%
+          setNames("elev") %>% st_crop(psaVeg@regionMap %>% st_buffer(500) %>% st_transform(4326)) %>% suppressMessages() %>% suppressWarnings()
+        
+
         psaEnv_init <- lapply(clim_stars, function(x) st_extract(x, psaCrds) %>% pull(1) %>% unlist()) %>% Reduce("cbind", .) %>% 
           as_tibble() %>% setNames(clim_variables$Var_Name) %>% mutate(
             elev = st_extract(read_stars(clim_dir[grepl("ETOPO", clim_dir)]) %>% st_set_crs(4326) %>% setNames("elev"), psaCrds) %>% pull(1) 
           )
         
-        class_z <- class_defs %>% filter(Include_Class_In_Calibration | Transfer) %>% pull(Class_Code) 
+        allEnv_init <- append(lapply(clim_stars, function(x) tibble(var = as.numeric(x[[1]])) %>% bind_rows(var = psaEnv_init %>% 
+                                 dplyr::select(names(x))) %>% filter(!is.na(var)) %>% pull(var)),
+                              list(c(as.numeric(elev_stars[[1]][!is.na(elev_stars[[1]])]), psaEnv_init$elev)))
+          
+          
+        ## Landcover Classes for transformation
+        class_z  <- class_defs %>% filter(Include_Class_In_Calibration | Transfer) %>% pull(Class_Code) 
+        envClass <- tibble(lcov = st_extract(dataset_rast, st_as_sf(st_coordinates(clim_stars[[1]]), coords = c("x", "y"), crs = 4326)) %>% pull(1)) %>%
+          mutate(zTrans = !is.na(lcov) & lcov %in% class_z)
         
-        ## transformation parameters
-        elev   <-  read_stars(clim_dir[grepl("ETOPO", clim_dir)]) %>% st_set_crs(4326) %>%
-          st_crop(psaVeg@psas %>% filter(Dataset_ID==current_psa$Dataset_ID) %>% st_buffer(.$'Pollen_Source_Radius [m]') %>% st_transform(4326)) %>%
-          st_as_stars() %>% suppressMessages()
-        
-        allCim <- append(lapply(clim_variables$Var_Name, function(x) {
-          ind  <- which(sapply(clim_dir, function(y) grepl(glue::glue("_{x}_"), y, fixed = T)))
-          rast <- read_stars(clim_dir[ind]) %>% setNames(x) %>% 
-            st_crop(psaVeg@psas %>% filter(Dataset_ID==current_psa$Dataset_ID) %>% st_buffer(.$'Pollen_Source_Radius [m]') %>% st_transform(4326)) %>%
-            st_as_stars() %>% suppressMessages()
-          tibble(vals = c(rast[[1]]), class = st_extract(dataset_rast, st_as_sf(st_coordinates(rast), coords = c("x", "y"), crs = 4326)) %>% pull(1)) %>%
-            filter(class %in% class_z) %>% pull(vals)
-          }), list(
-            tibble(vals = c(elev[[1]]), class = st_extract(dataset_rast, st_as_sf(st_coordinates(elev), coords = c("x", "y"), crs = 4326)) %>% pull(1)) %>%
-                     filter(class %in% class_z) %>% pull(vals)
-          ))
-        
+        ## z transformation table
         z_tranTab <- lapply(1:ncol(psaEnv_init), function(x) {
-          tibble(Var_Name = c(clim_variables$Var_Name, "elev")[x], 
-                 mean = mean(c(psaEnv_init %>% pull(x), allCim[[x]]), na.rm = T),
-                 sd   = sd(c(psaEnv_init %>% pull(x), allCim[[x]]), na.rm = T))
+          tibble(Var_Name = names(psaEnv_init)[x], 
+                 mean = mean(allEnv_init[[x]], na.rm = T),
+                 sd   = sd(allEnv_init[[x]], na.rm = T))
         }) %>% Reduce("rbind", .)
         
         ## apply z transformation to psaEnv
@@ -390,8 +388,14 @@ rr <- which(psa_metadata$Dataset_ID==1987)
           tibble(c(scale(dat, z_tranTab[x,2], z_tranTab[x,3])))
         }) %>% Reduce("cbind",.) %>% setNames(names(psaEnv_init))
         
-        
-        save(psaEnv, file = glue::glue("{dir_out}/psaEnv/psaEnv.rda"))
+        ## apply z transformation to environment
+        env_stars <- lapply(1:nrow(z_tranTab), function(x) {
+          append(clim_stars, list(elev_stars))[[x]] %>% setNames("var") %>%
+            mutate(var = scale(var, z_tranTab[x,2], z_tranTab[x,3]))
+        }) %>% do.call("c", .) %>% setNames(z_tranTab$Var_Name) %>% merge()
+  
+        save(env_stars, file = glue::glue("{dir_out}/psaEnv/env_stars.rda"))
+        save(psaEnv,    file = glue::glue("{dir_out}/psaEnv/psaEnv.rda"))
         save(z_tranTab, file = glue::glue("{dir_out}/psaEnv/z_tranTab.rda"))
       }
     } ## end 3.2
@@ -399,13 +403,15 @@ rr <- which(psa_metadata$Dataset_ID==1987)
   #### 3.3 RDA models   
   {
   
-    ## psaCrds: coordinates of selected pixels per class
-    ## psaEnv:  environmental variable (z-transformed)
+    ## env_stars: z-transformed environmental variables
+    ## psaCrds:   coordinates of selected pixels per class
+    ## psaEnv:    environmental variable (z-transformed)
     
     if(!file.exists(glue::glue("{dir_out}/psaOvlp/psaOvlp.rda")) & check_files) {
         
-        load(glue::glue("{dir_out}/psaCrds/psaCrds.rda")) ## psaCrds
-        load(glue::glue("{dir_out}/psaEnv/psaEnv.rda"))   ## psaEnv
+        load(glue::glue("{dir_out}/psaEnv/env_stars.rda")) ## env_stars
+        load(glue::glue("{dir_out}/psaCrds/psaCrds.rda"))  ## psaCrds
+        load(glue::glue("{dir_out}/psaEnv/psaEnv.rda"))    ## psaEnv
         
         datst <- psaCrds %>% st_drop_geometry() %>% dplyr::select(-Dataset_ID) %>%
           bind_cols(psaEnv) %>% mutate(lcov = as.factor(lcov))
@@ -423,7 +429,16 @@ rr <- which(psa_metadata$Dataset_ID==1987)
         save(rdaOut, file = glue::glue("{dir_out}/summaryResults/rdaOut.rda"))
         
         ### Overlap and centers
-        psaOvlp <- make_psaOvlp(rdaOut)
+        #### ovlp range
+        zTransEnvRDA <- as.data.frame(
+            predict(
+              rdaOut$rda_model,
+              env_stars %>% st_as_sf() %>% st_drop_geometry() %>% as.data.frame(),
+              type = "wa",
+              scaling = 1
+            )) %>% dplyr::select("RDA1", "RDA2")
+        
+        psaOvlp <- make_psaOvlp(rdaOut, range_axes = apply(zTransEnvRDA, 2, range))
         
         # plot(psaOvlp@centers)
         # plot(psaOvlp@densities)
@@ -448,27 +463,9 @@ rr <- which(psa_metadata$Dataset_ID==1987)
   #### 4.1 Init Maps
   {
 
-    ## load(z-trans variables)
-    load(glue::glue("{dir_out}/psaEnv/z_tranTab.rda"))
-      
-    ## Climate maps
-    clim_variables <- read_xlsx(glue::glue("{data_dir}/settings/bioclim_vars_definitions.xlsx"))
-    clim_dir       <- list.files(glue::glue("{data_dir}/data/global_maps"), pattern = "*.tif", full.names = T)
-      
-    clim_stars <- lapply(clim_variables$Var_Name, function(x) {
-      ind <- which(sapply(clim_dir, function(y) grepl(glue::glue("_{x}_"), y, fixed = T)))
-      read_stars(clim_dir[ind]) %>% setNames(x) %>% st_crop(psaVeg@regionMap %>% st_buffer(500) %>% st_transform(4326)) %>% st_as_stars() %>% suppressMessages()
-    })
-      
-    elev_stars <- read_stars(clim_dir[grepl("ETOPO", clim_dir)]) %>% st_set_crs(4326)  %>%
-      st_warp(., clim_stars[[1]], use_gdal = F, method = "near") %>%
-      setNames("elev") %>% suppressMessages() %>% suppressWarnings()
-      
-    env_stars <- lapply(1:nrow(z_tranTab), function(x) {
-      append(clim_stars, list(elev_stars))[[x]] %>% setNames("var") %>%
-        mutate(var = scale(var, z_tranTab[x,2], z_tranTab[x,3]))
-    }) %>% do.call("c", .) %>% setNames(z_tranTab$Var_Name) %>% merge()
-    
+   ## load(z-trans variables)
+   load(glue::glue("{dir_out}/psaEnv/env_stars.rda"))
+   
    ## LandCover Init Map 
    if(!file.exists(glue::glue("{dir_out}/summaryResults/map_init.png"))  & check_files) {
       dataset_rast <- read_stars(glue::glue("{dir_out}/summaryResults/dataset_rast.tiff"))
@@ -543,7 +540,8 @@ rr <- which(psa_metadata$Dataset_ID==1987)
     load(glue::glue("{dir_out}/summaryResults/initRast.rda"))
     load(glue::glue("{dir_out}/summaryResults/rdaOut.rda"))
     load(glue::glue("{dir_out}/psaOvlp/psaOvlp.rda"))
-
+    load(glue::glue("{dir_out}/psaEnv/env_stars.rda"))
+    
     ### Landcover classes
     lcovs     <- st_dimensions(psaOvlp@densities)$attributes$values
     lcovs_num <- as.numeric(gsub("LC_", "", lcovs))
@@ -570,13 +568,13 @@ rr <- which(psa_metadata$Dataset_ID==1987)
         scaling = 1
       )) %>% dplyr::select("RDA1", "RDA2") %>% st_as_sf(coords = c("RDA1", "RDA2"))
     
-    ggplot() +
-      geom_sf(data = init_rda) +
-      geom_sf(data = psaOvlp@densities %>% st_bbox() %>% st_as_sfc())
+    # ggplot() +
+    #   geom_sf(data = init_rda) +
+    #   geom_sf(data = psaOvlp@densities %>% st_bbox() %>% st_as_sfc(), fill = NA)
     
     init_ovlp <- init_rda %>%
       st_extract(lapply(1:dim(psaOvlp@densities)[3], function(x) {
-                    split(psaOvlp@densities)[x,] %>% setNames("densities") %>% mutate(densities = abs(densities - 1))
+                    split(psaOvlp@densities)[x,] %>% setNames("densities")
                     }) %>% do.call("c", .) %>% setNames(lcovs) %>% merge(), .) %>% st_as_sf() %>% st_drop_geometry()
     
     distCentre <- lapply(1:dim(psaOvlp@densities)[3], function(x) {
@@ -589,6 +587,19 @@ rr <- which(psa_metadata$Dataset_ID==1987)
       as.numeric(st_distance(init_rda, x))
     }) %>% Reduce("cbind", .) %>% as_tibble() %>% setNames(names(init_ovlp))
     
+    ## costs (with scaling)
+    envs  <- c(0, 100) ## no scaling NULL
+    dists <- c(0, 100) ## no scaling NULL
+    distF <- 0.5       ## no factor 1
+    if(!is.null(envs)) {
+      envs_scale <- max(envs) - scales::rescale(init_ovlp %>% as.matrix(), envs)
+    }  else envs_scale <- max(init_ovlp %>% as.matrix(), na.rm = T) - init_ovlp %>% as.matrix()
+    if(!is.null(dists)) {
+      dist_scale <- scales::rescale(init_dist %>% as.matrix(), dists)
+    }  else dist_scale <- init_dist %>% as.matrix()
+    costs <- abind::abind(envs_scale, dist_scale*distF, along = 3) %>% 
+                apply(., 1:2, sum, na.rm = T)
+    
     classFlow <- matrix(nrow = nrow(init_env), ncol = length(psaFlow$Age %>% unique())+1)
     classFlow[,1] <- init_crds$Landcover
      
@@ -598,11 +609,6 @@ rr <- which(psa_metadata$Dataset_ID==1987)
        cat("\b\b\b\b\b\b")
        cat(sprintf("%6d",y))
        flush.console()
-       
-       # costs <- abind::abind(init_ovlp %>% as.matrix(), init_dist %>% as.matrix(), along = 3) %>% 
-       #                  apply(., 1:2, sum, na.rm = T)
-       costs <- init_dist %>% as.matrix()
-       # costs[is.na(costs)] <- max(costs)
        
        old_p <- ((tibble(lcov = classFlow[,y-1]) %>% group_by(lcov) %>% summarize(p = n()) %>%
          right_join(tibble(lcov = lcovs_num), by = "lcov", ) %>% mutate(p = ifelse(is.na(p), 0, p)) %>%
@@ -708,7 +714,7 @@ rr <- which(psa_metadata$Dataset_ID==1987)
       dplyr::select(Class_Code, lcov, Class_Plotlabel, Predicted_In_Past, Color_Code, Transfer)
     
     ggplot() +
-      geom_stars(data = LcovOut[,,,1:10], mapping = aes(fill = as.factor(LandcoverChange))) +
+      geom_stars(data = LcovOut[,,,1:14], mapping = aes(fill = as.factor(LandcoverChange))) +
       facet_wrap(~attributes) +
       scale_fill_manual(values = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(Color_Code),
                         breaks = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(lcov),

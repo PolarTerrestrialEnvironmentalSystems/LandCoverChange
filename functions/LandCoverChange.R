@@ -1328,9 +1328,9 @@ rdaMod <- function(df, ID, significance_tests = FALSE) {
        significance_df = sig_df)
 }
 
-make_psaOvlp <- function(rdaOut) {
+make_psaOvlp <- function(rdaOut, range_axes = NULL) {
   
-  range_axes <- apply(rdaOut$vars_transf_rds_wa_sc_1[,2:3], 2, range)
+  if(is.null(range_axes)) range_axes <- apply(rdaOut$vars_transf_rds_wa_sc_1[,2:3], 2, range)
   classes    <- rownames(rdaOut$transl_lc_rds)
   
   ## Density per class
