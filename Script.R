@@ -46,11 +46,9 @@ project_dir <- "~/Documents/LandCoverChange_test"
   # )
 }
 
-
 ### PSAs
 metadata_path <- "/Volumes/projects/bioing/data/LandCoverChange/" 
 psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hemisphere.csv"), show_col_types = F)
-
 
 # for(rr in 1:nrow(psa_metadata)) {
 rr <- which(psa_metadata$Dataset_ID==15814)
@@ -107,6 +105,11 @@ rr <- which(psa_metadata$Dataset_ID==15814)
     
     ## Maximal spatial buffer around PSA
     max_buffer             <- 1000        # maximum buffer for search
+    
+    ## Flow cost parameters
+    envs  <- c(0, 100) ## no scaling NULL
+    dists <- c(0, 100) ## no scaling NULL
+    distF <- 0.5       ## no factor 1
   }
   
   #### 1.3 Create vegetation object for PSA
@@ -486,7 +489,7 @@ rr <- which(psa_metadata$Dataset_ID==15814)
           
           pl_human <- ggplot() +
             geom_stars(data = initRast[1], mapping = aes(fill = as.factor(Landcover))) +
-            geom_sf(psaVeg@psas %>% filter(Dataset_ID %in% ID) %>% st_transform(4326), mapping = aes(geometry = geometry), fill = NA, color="cyan") + 
+            # geom_sf(psaVeg@psas %>% filter(Dataset_ID %in% ID) %>% st_transform(4326), mapping = aes(geometry = geometry), fill = NA, color="cyan") + 
             scale_fill_manual(values = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(Color_Code),
                               breaks = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(lcov),
                               labels = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(Class_Plotlabel), name = "Landcover") +
@@ -510,9 +513,13 @@ rr <- which(psa_metadata$Dataset_ID==15814)
           
           toClass <- as.numeric(gsub("LC_", "", names(transRDA %>% st_drop_geometry())))
           
-          transCls <- toClass[abind::abind(as.matrix(transRDA %>% st_drop_geometry()),
-            lapply(1:nrow(psaOvlp@centers), function(x) (st_point(as.numeric(psaOvlp@centers[x,])) %>% st_sfc() %>% st_distance(., transRDA %>% st_geometry()))[1,]) %>%
-            Reduce("cbind", .) %>% as.matrix(), along = 3) %>% apply(., 1:2, function(x) ifelse(is.na(x[1]), 0, x[1]) + (1 - x[2])) %>% apply(., 1, function(x) which.max(x))]
+          transDists <- (lapply(1:nrow(psaOvlp@centers), function(x) 
+            (st_point(as.numeric(psaOvlp@centers[x,])) %>% st_sfc() %>% st_distance(., transRDA %>% st_geometry()))[1,]) %>%
+            Reduce("cbind", .) %>% as.matrix() %>% scales::rescale(., dists))*distF
+          
+          
+          transCls <- toClass[abind::abind(envs[2]-(transRDA %>% st_drop_geometry() %>% as.matrix() %>% scales::rescale(., envs)),
+                                           transDists, along = 3) %>% apply(., 1:2, sum) %>% apply(., 1, function(x) which.min(x))]
           
           transPxl$Landcover[as.numeric(transPxl %>% filter(Landcover %in% trans) %>% pull(index))] <- transCls
           initRast[1] <- initRast[1] %>% mutate(Landcover = transPxl %>% pull(Landcover))
@@ -521,7 +528,7 @@ rr <- which(psa_metadata$Dataset_ID==15814)
           
       ggplot() +
         geom_stars(data = initRast[1], mapping = aes(fill = as.factor(Landcover))) +
-        geom_sf(psaVeg@psas %>% filter(Dataset_ID %in% ID) %>% st_transform(4326), mapping = aes(geometry = geometry), fill = NA, color="cyan") + 
+        # geom_sf(psaVeg@psas %>% filter(Dataset_ID %in% ID) %>% st_transform(4326), mapping = aes(geometry = geometry), fill = NA, color="cyan") + 
         scale_fill_manual(values = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(Color_Code),
                           breaks = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(lcov),
                           labels = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(Class_Plotlabel), name = "Landcover") +
@@ -588,9 +595,6 @@ rr <- which(psa_metadata$Dataset_ID==15814)
     }) %>% Reduce("cbind", .) %>% as_tibble() %>% setNames(names(init_ovlp))
     
     ## costs (with scaling)
-    envs  <- c(0, 100) ## no scaling NULL
-    dists <- c(0, 100) ## no scaling NULL
-    distF <- 0.5       ## no factor 1
     if(!is.null(envs)) {
       envs_scale <- max(envs) - scales::rescale(init_ovlp %>% as.matrix(), envs)
     }  else envs_scale <- max(init_ovlp %>% as.matrix(), na.rm = T) - init_ovlp %>% as.matrix()
