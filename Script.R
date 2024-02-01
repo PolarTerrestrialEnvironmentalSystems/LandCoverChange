@@ -51,7 +51,7 @@ metadata_path <- "/Volumes/projects/bioing/data/LandCoverChange/"
 psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hemisphere.csv"), show_col_types = F)
 
 # for(rr in 1:nrow(psa_metadata)) {
-rr <- which(psa_metadata$Dataset_ID==15814)
+rr <- which(psa_metadata$Dataset_ID==2378)
     
   cat("\n")
   print(paste0("PSA: ", psa_metadata$Dataset_ID[rr]," (",rr,"/",nrow(psa_metadata),")"))
@@ -109,7 +109,10 @@ rr <- which(psa_metadata$Dataset_ID==15814)
     ## Flow cost parameters
     envs  <- c(0, 100) ## no scaling NULL
     dists <- c(0, 100) ## no scaling NULL
-    distF <- 0.5       ## no factor 1
+    distF <- 0.05       ## no factor 1
+    
+    ## Human classes will be transfered with (TRUE) or without (FALSE) scaling in relation to lancover distribution in PSA
+    scaleDensity = T
   }
   
   #### 1.3 Create vegetation object for PSA
@@ -260,7 +263,6 @@ rr <- which(psa_metadata$Dataset_ID==15814)
     if(!file.exists(glue::glue("{dir_out}/psaCrds/psaCrds.rda")) & check_files) {
       
       ## filterLCover
-      
       psa      <- psaVeg@psas %>% filter(Dataset_ID==ID) %>% st_buffer(.$'Pollen_Source_Radius [m]')
       bufferS  <- seq(0, max_buffer*1000, length = 10)
       
@@ -270,7 +272,7 @@ rr <- which(psa_metadata$Dataset_ID==15814)
           x %>% filter(radius==0) %>% mutate(cumsum = count)
         } else {
           tmp <- x %>% mutate(cumsum = cumsum(count),
-                              over   = cumsum>pxl_extract_PSA_buffer)
+                              over   = c(FALSE, (cumsum>pxl_extract_PSA_buffer)[-1]))
           if(sum(tmp$over)>1) {
             tmp[1:min(which(tmp$over)),] %>% filter(count>0) %>% dplyr::select(-over)
             } else {
@@ -308,11 +310,14 @@ rr <- which(psa_metadata$Dataset_ID==15814)
             
           dts <- dataset$updateMask(classImage$gt(0))
  
-          table = dts$sample(
+          table = dts$stratifiedSample(
+            numPoints = min(c(classTab$count[rad], pxl_extract_PSA)),
             region = bbox_ee,
             scale = (dts$projection()$nominalScale()$getInfo()),
             geometries = TRUE
-          )$limit(min(c(classTab$count[rad], pxl_extract_PSA)))$getInfo()
+          )$getInfo()
+            # numPixels = min(c(classTab$count[rad], pxl_extract_PSA))
+          # )$limit(min(c(classTab$count[rad], pxl_extract_PSA)), 'b1')$getInfo()
             
           lapply(table[[4]], function(f) {
                 tibble(Dataset_ID = current_psa$Dataset_ID,
@@ -371,11 +376,6 @@ rr <- which(psa_metadata$Dataset_ID==15814)
                                  dplyr::select(names(x))) %>% filter(!is.na(var)) %>% pull(var)),
                               list(c(as.numeric(elev_stars[[1]][!is.na(elev_stars[[1]])]), psaEnv_init$elev)))
           
-          
-        ## Landcover Classes for transformation
-        # class_z  <- class_defs %>% filter(Include_Class_In_Calibration | Transfer) %>% pull(Class_Code) 
-        # envClass <- tibble(lcov = st_extract(dataset_rast, st_as_sf(st_coordinates(clim_stars[[1]]), coords = c("x", "y"), crs = 4326)) %>% pull(1)) %>%
-        #   mutate(zTrans = !is.na(lcov) & lcov %in% class_z)
         
         ## z transformation table
         z_tranTab <- lapply(1:ncol(psaEnv_init), function(x) {
@@ -485,6 +485,7 @@ rr <- which(psa_metadata$Dataset_ID==15814)
       ### Class transfer
       {
         trans <- class_defs %>% mutate(Merge_To_Class = ifelse(!is.na(Merge_To_Class), Merge_To_Class, Class_Code)) %>% filter(Transfer) %>% pull(Merge_To_Class) %>% unique()
+        
         if(any(unique(c(initRast[[1]]))%in%trans)){
           
           pl_human <- ggplot() +
@@ -498,17 +499,23 @@ rr <- which(psa_metadata$Dataset_ID==15814)
           
           ggsave(plot = pl_human, file = glue::glue("{dir_out}/summaryResults/map_init_withHuman.png"), width = 20, height = 12, units = "cm")
           
-          transPxl <- initRast[1] %>% st_as_sf(na.rm = FALSE) %>% st_centroid() %>% rownames_to_column(var = "index") %>% suppressWarnings()
+          transPxl <- initRast[1] %>% st_as_sf(na.rm = FALSE) %>% st_centroid() %>% mutate(index = 1:nrow(.)) %>% suppressWarnings()
           transEnv <- st_extract(env_stars, transPxl %>% filter(Landcover %in% trans)) %>% st_as_sf() %>% st_drop_geometry()  
           
+          if(scaleDensity) {
+            ovl_scaled <- lapply(1:dim(psaOvlp@densities)[3], function(x) {
+              (split(psaOvlp@densities)[x,] %>% setNames("densities"))*as.numeric((lcovShares %>% filter(Dataset_ID==ID))[x+1])
+            }) %>% do.call("c", .) %>% setNames(names(split(psaOvlp@densities))) %>% merge()
+          } else ovl_scaled <- psaOvlp@densities
+            
           transRDA <- st_extract(
-            psaOvlp@densities,
+            ovl_scaled,
               predict(
                 psaOvlp@rda_mod[[1]],
                 newdata = transEnv %>% as.data.frame(),
                 type = "wa",
                 scaling = 1
-              )[,1:2] %>% apply(., 2, zoo::na.approx) %>% as.data.frame() %>% st_as_sf(coords = c("RDA1", "RDA2"))
+              )[,1:2] %>% as.data.frame() %>% st_as_sf(coords = c("RDA1", "RDA2"))
           ) %>% st_as_sf()
           
           toClass <- as.numeric(gsub("LC_", "", names(transRDA %>% st_drop_geometry())))
@@ -519,7 +526,9 @@ rr <- which(psa_metadata$Dataset_ID==15814)
           
           
           transCls <- toClass[abind::abind(envs[2]-(transRDA %>% st_drop_geometry() %>% as.matrix() %>% scales::rescale(., envs)),
-                                           transDists, along = 3) %>% apply(., 1:2, sum) %>% apply(., 1, function(x) which.min(x))]
+                                           transDists, along = 3) %>% apply(., 1:2, function(x) sum(x)) %>% apply(., 1, function(x) which.min(x))]
+          
+          # transPxl %>% filter(Landcover %in% trans) %>% mutate(lcov_new = transCls) %>% dplyr::select(lcov_new) %>% plot(pch = 16, cex = 0.15)
           
           transPxl$Landcover[as.numeric(transPxl %>% filter(Landcover %in% trans) %>% pull(index))] <- transCls
           initRast[1] <- initRast[1] %>% mutate(Landcover = transPxl %>% pull(Landcover))
