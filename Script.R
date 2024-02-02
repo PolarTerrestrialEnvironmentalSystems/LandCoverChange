@@ -51,7 +51,7 @@ metadata_path <- "/Volumes/projects/bioing/data/LandCoverChange/"
 psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hemisphere.csv"), show_col_types = F)
 
 # for(rr in 1:nrow(psa_metadata)) {
-rr <- which(psa_metadata$Dataset_ID==2378)
+rr <- which(psa_metadata$Dataset_ID==813)
     
   cat("\n")
   print(paste0("PSA: ", psa_metadata$Dataset_ID[rr]," (",rr,"/",nrow(psa_metadata),")"))
@@ -156,14 +156,20 @@ rr <- which(psa_metadata$Dataset_ID==2378)
   
   #### 2.2 CCI LandCover map of PSA
   {
-    roi = sf_as_ee(psaVeg@regionMap %>% st_transform(4326) %>% st_shift_longitude())
+    roi_sf  <- psaVeg@regionMap %>% st_transform(4326)
+    roi     <- roi_sf %>% st_shift_longitude() %>% sf_as_ee()
     dataset <- ee$Image(glue::glue("users/slisovski/LandCoverChange/LandCover_CCI_{resolution}"))
     
     if(!file.exists(glue::glue("{dir_out}/summaryResults/dataset_rast.tiff")) & check_files) {
-      dataset_rast <- getLCCfromGEE(ee_dataset = dataset, sf_roi = psaVeg@regionMap, y_max = 500, buffer = 0.1)
+      if(diff(range(st_coordinates(roi_sf)[,1]))<100) {
+        dataset_rast <- read_stars(glue::glue("{data_dir}/data/global_maps/C3S-LC-L4-LCCS-Map-300m-P1Y-2020-v2.1.1.tif")) %>%
+        st_crop(roi_sf) %>% st_as_stars() %>% suppressWarnings() %>% suppressMessages()
+      } else {
+        dataset_rast <- getLCCfromGEE(ee_dataset = dataset, sf_roi = psaVeg@regionMap, y_max = 500, buffer = 0.1)
+      }
       write_stars(dataset_rast, glue::glue("{dir_out}/summaryResults/dataset_rast.tiff"))
     } else dataset_rast <- read_stars(glue::glue("{dir_out}/summaryResults/dataset_rast.tiff"))
-       
+
     # extract number of pixel per class
     class_areas  = ee$Image$pixelArea()$addBands(dataset)$reduceRegions(
       collection = roi,
@@ -366,17 +372,22 @@ rr <- which(psa_metadata$Dataset_ID==2378)
           st_warp(., clim_stars[[1]], use_gdal = F, method = "near") %>%
           setNames("elev") %>% st_crop(psaVeg@regionMap %>% st_buffer(500) %>% st_transform(4326)) %>% suppressMessages() %>% suppressWarnings()
         
-
-        psaEnv_init <- lapply(clim_stars, function(x) st_extract(x, psaCrds) %>% pull(1) %>% unlist()) %>% Reduce("cbind", .) %>% 
-          as_tibble() %>% setNames(clim_variables$Var_Name) %>% mutate(
-            elev = st_extract(read_stars(clim_dir[grepl("ETOPO", clim_dir)]) %>% st_set_crs(4326) %>% setNames("elev"), psaCrds) %>% pull(1) 
-          )
+        ### Environment for selected crds
+        psaEnv_init <-  lapply(clim_variables$Var_Name, function(x)
+                          read_stars(clim_dir[which(sapply(clim_dir, function(y) grepl(glue::glue("_{x}_"), y, fixed = T)))]) %>% 
+                            setNames(x) %>% suppressMessages() %>% st_extract(psaCrds) %>% 
+                            pull(1) %>% unlist()) %>% Reduce("cbind", .) %>% as_tibble() %>% setNames(clim_variables$Var_Name) %>% 
+                          mutate(elev = st_extract(
+                            read_stars(clim_dir[grepl("ETOPO", clim_dir)]) %>% st_set_crs(4326) %>% setNames("elev"),
+                            psaCrds) %>% pull(1))
         
-        allEnv_init <- append(lapply(clim_stars, function(x) tibble(var = as.numeric(x[[1]])) %>% bind_rows(var = psaEnv_init %>% 
-                                 dplyr::select(names(x))) %>% filter(!is.na(var)) %>% pull(var)),
-                              list(c(as.numeric(elev_stars[[1]][!is.na(elev_stars[[1]])]), psaEnv_init$elev)))
+        ### Environment for selected crds and complete psa
+        allEnv_init <- lapply(1:ncol(psaEnv_init), function(x) {
+          if(x<ncol(psaEnv_init)) {
+            tibble(var = c(clim_stars[[x]][[1]], psaEnv_init %>% pull(x))) %>% filter(!is.na(var)) %>% pull(1)
+          } else tibble(var = c(elev_stars[[1]], psaEnv_init %>% pull(x))) %>% filter(!is.na(var)) %>% pull(1)
+        })
           
-        
         ## z transformation table
         z_tranTab <- lapply(1:ncol(psaEnv_init), function(x) {
           tibble(Var_Name = names(psaEnv_init)[x], 
@@ -694,7 +705,7 @@ rr <- which(psa_metadata$Dataset_ID==2378)
      pl <- ggplot(test_out, aes(x = P, y = Age, color = Type)) +
        geom_path() +
        facet_wrap(~LCov)
-     ggsave(glue::glue("{dir_out}/psaChange/flow_comparison.png"), plot = pl, width = 30, height = 22, units = "cm")
+     ggsave(glue::glue("{dir_out}/summaryResults/flow_comparison.png"), plot = pl, width = 30, height = 22, units = "cm")
      
      
      psaPixelFlow <- list(crds = init_crds %>% dplyr::select(-Landcover), 
