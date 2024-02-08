@@ -50,8 +50,8 @@ project_dir <- "~/Documents/LandCoverChange_test"
 metadata_path <- "/Volumes/projects/bioing/data/LandCoverChange/" 
 psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hemisphere.csv"), show_col_types = F)
 
-# for(rr in 1:nrow(psa_metadata)) {
-rr <- which(psa_metadata$Dataset_ID==813)
+for(rr in 1:nrow(psa_metadata)) {
+# rr <- which(psa_metadata$Dataset_ID==813)
     
   cat("\n")
   print(paste0("PSA: ", psa_metadata$Dataset_ID[rr]," (",rr,"/",nrow(psa_metadata),")"))
@@ -747,6 +747,6 @@ rr <- which(psa_metadata$Dataset_ID==813)
 
   }
   
-# }
+}
   
   
