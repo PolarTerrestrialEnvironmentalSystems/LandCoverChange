@@ -1,0 +1,3 @@
+#!/bin/bash
+
+seq 1 2 | parallel -j2 Rscript /Users/slisovsk/Documents/LandCoverChange/PixelFlow_Linux5.R
