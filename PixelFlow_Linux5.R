@@ -1,7 +1,7 @@
 #################################
 ### Template: LandCoverChange ###
 ### 22.10.2023                ###
-### Slurm Linux 5             ###
+###  Linux 5/1                ###
 #################################
 
 suppressMessages({
@@ -24,30 +24,47 @@ library(vegan)
 #############
 
 ### Project folder
-project_dir <- "/bioing/data/LandCoverChange/Run_Feb2024"
-data_dir    <- "/bioing/data/LandCoverChange/LandCoverChangeProject_data_Run_Feb2024"
+project_dir <- "/Volumes/projects/bioing/data/LandCoverChange/Run_Feb2024"
+rda_dir     <- "/Volumes/projects/bioing/data/LandCoverChange/TestRuns_PSA_Script_RDAtest"
+data_dir    <- "/Volumes/projects/bioing/data/LandCoverChange/LandCoverChangeProject_data_Run_Feb2024"
 
-### available PSAs
-PSAs <- tibble(name = list.files(project_dir)) %>% mutate(PSA = grepl("PSA", name, fixed = TRUE)) %>%
-  filter(PSA) %>% mutate(ID = sapply(strsplit(name, "_"), function(x) as.numeric(x[[2]])))
+
+### LogFile Update
+{
+  # logfile <- tibble(Name = list.files(rda_dir)) %>% mutate(PSA = grepl("PSA", Name, fixed = TRUE)) %>%
+  #   filter(PSA) %>% mutate(ID = sapply(strsplit(Name, "_"), function(x) as.numeric(x[[2]]))) %>%
+  #   dplyr::select(-PSA) %>% 
+  #   left_join(tibble(Name = list.files(project_dir)) %>% mutate(PSA = grepl("PSA", Name, fixed = TRUE)) %>%
+  #                filter(PSA) %>% mutate(ID = sapply(strsplit(Name, "_"), function(x) as.numeric(x[[2]])), psaChange = TRUE) %>%
+  #                dplyr::select(-PSA)) %>% mutate(psaChange = ifelse(is.na(psaChange), FALSE, psaChange))
+  # write_delim(logfile, glue::glue("{project_dir}/logfile.txt"), delim = "\t")
+  logfile <- read_delim(glue::glue("{project_dir}/logfile.txt"), delim = "\t") %>% 
+    filter(!psaChange) %>% suppressMessages()
+}
 
 ### Current run
 run <- as.numeric(commandArgs(trailingOnly = T))
 
-ID <- PSAs$ID[run]
-dir_out <- glue::glue("{project_dir}/{PSAs$name[run]}")
+ID   <- logfile$ID[run]
+name <- logfile$Name[run]
+dir_out <- glue::glue("{project_dir}/{name}")
 
-print(paste0("PSA: ", ID))
-### LogTab
-logTab <- read_delim(glue::glue("{project_dir}/LogTab.txt"), delim = "\t") %>% suppressMessages()
-
-if(!(ID %in% logTab$PSA_ID)) {
-  logTab_out <- tibble(PSA_ID = ID, Start = Sys.time(), End = NA, Time = NA, Error = NA)
-  write_delim(logTab_out, file = glue::glue("{project_dir}/LogTab.txt"), delim = "\t", append = T)
+### Create folder and copy files
+{
+  dir.create(dir_out)
+  invisible(lapply(c("psaChange", "summaryResults"), function(x) dir.create(glue::glue("{dir_out}/{x}"))))
+  
+  ## Move files
+  fls <- list.files(glue::glue("{rda_dir}/{logfile$Name[run]}"), recursive = T)
+  invisible(lapply(c("map_init.png", "map_init_withHuman", "Map.png", "rda_summary.png"), function(x) {
+    if(any(grepl(x, fls, fixed = TRUE))) {
+      file.copy(glue::glue("{rda_dir}/{logfile$Name[run]}/{fls[which(grepl(x, fls, fixed = TRUE))]}"),
+                glue::glue("{project_dir}/{logfile$Name[run]}/{fls[which(grepl(x, fls, fixed = TRUE))]}"))
+    }
+  }))
 }
 
 runOut <- tryCatch({
-
   if(!file.exists(glue::glue("{dir_out}/psaChange/psaPixelFlow.rda"))) {
 
     #### class definitions
@@ -72,7 +89,7 @@ runOut <- tryCatch({
 
       ## Human classes will be transfered with (TRUE) or without (FALSE) scaling in relation to lancover distribution in PSA
       scaleDensity = T
-}
+    }
 
     ###################################
     ### Pixel flow                  ###
@@ -82,12 +99,12 @@ runOut <- tryCatch({
     {
       if(!file.exists(glue::glue("{dir_out}/psaChange/psaPixelFlow.rda"))) {
 
-        load(glue::glue("{dir_out}/summaryResults/initRast.rda"))
-        load(glue::glue("{dir_out}/summaryResults/rdaOut.rda"))
-        load(glue::glue("{dir_out}/summaryResults/psaLCover.rda"))
-        load(glue::glue("{dir_out}/psaOvlp/psaOvlp.rda"))
-        load(glue::glue("{dir_out}/summaryResults/psaLCover.rda"))
-        load(glue::glue("{dir_out}/psaEnv/env_stars.rda"))
+        load(glue::glue("{rda_dir}/{name}/summaryResults/initRast.rda"))
+        load(glue::glue("{rda_dir}/{name}/summaryResults/rdaOut.rda"))
+        load(glue::glue("{rda_dir}/{name}/summaryResults/psaLCover.rda"))
+        load(glue::glue("{rda_dir}/{name}/psaOvlp/psaOvlp.rda"))
+        load(glue::glue("{rda_dir}/{name}/summaryResults/psaLCover.rda"))
+        load(glue::glue("{rda_dir}/{name}/psaEnv/env_stars.rda"))
 
         ### Landcover classes
         lcovs     <- st_dimensions(psaOvlp@densities)$attributes$values
@@ -131,7 +148,7 @@ runOut <- tryCatch({
 
         init_dist <- distCentre %>% lapply(., function(x) {
           as.numeric(st_distance(init_rda, x))
-        }) %>% Reduce("cbind", .) %>% as_tibble() %>% setNames(names(init_ovlp))
+        }) %>% Reduce("cbind", .) %>% as_tibble() %>% setNames(names(init_ovlp)) %>% suppressWarnings()
 
         ## costs (with scaling)
         if(!is.null(envs)) {
@@ -206,7 +223,7 @@ runOut <- tryCatch({
 
         }
         ### end   FLOW ####
-
+          
         ## test plot
         test_out <- lapply(1:ncol(classFlow), function(x) {
           (as_tibble(classFlow)[,x]) %>%
@@ -237,8 +254,9 @@ runOut <- tryCatch({
     {
 
       if(!file.exists(glue::glue("{dir_out}/psaChange/changeMap.rda"))) {
+        
         load(glue::glue("{dir_out}/psaChange/psaPixelFlow.rda"))
-        load(glue::glue("{dir_out}/summaryResults/initRast.rda"))
+        load(glue::glue("{rda_dir}/{name}/summaryResults/initRast.rda"))
 
 
         LcovOut <- lapply(1:ncol(psaPixelFlow$flow), function(x) {
@@ -269,16 +287,12 @@ runOut <- tryCatch({
 }
 
   }
-
-NULL
-
+  NULL
 }, error = function(e) e) %>% suppressWarnings() %>% suppressMessages()
 
-
-logTab <- read_delim(glue::glue("{project_dir}/LogTab.txt"), delim = "\t") %>% filter(!is.na(PSA_ID)) %>% suppressMessages()
-logTab[logTab$PSA_ID==ID, "End"]  <- Sys.time()
-logTab[logTab$PSA_ID==ID, "Time"] <- as.numeric(difftime(logTab[logTab$PSA_ID==ID, ] %>% pull(End),
-                                                         logTab[logTab$PSA_ID==ID, ] %>% pull(Start), units = "hours"))
-logTab[logTab$PSA_ID==ID, "Error"] <- ifelse(!is.null(runOut), runOut$message, "none")
-
-write_delim(logTab, file = glue::glue("{project_dir}/LogTab.txt"), delim = "\t")
+if(any(class(runOut)%in%"error")) {
+  png(glue::glue("{dir_out}/summaryResults/error.png"))
+  plot(1:10, 1:10, type = "n", xaxt = "n", yaxt = "n", xlab = "", ylab = "")
+  text(5,5,glue::glue("Error Message: \n {runOut$message}"), cex = 2)
+  dev.off()
+}
