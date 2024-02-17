@@ -1,6 +1,6 @@
 #!/bin/bash
 
-for i in {1..132}; do 
+for i in {1..1000}; do 
     ((i=i%50)); ((i++==0)) && wait
     Rscript /home/pd/slisovsk/Documents/LandCoverChange/PixelFlow_Linux5.R ${i} &
 done

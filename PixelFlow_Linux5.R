@@ -24,9 +24,9 @@ library(vegan)
 #############
 
 ### Project folder
-project_dir <- "/Volumes/projects/bioing/data/LandCoverChange/Run_Feb2024"
-rda_dir     <- "/Volumes/projects/bioing/data/LandCoverChange/TestRuns_PSA_Script_RDAtest"
-data_dir    <- "/Volumes/projects/bioing/data/LandCoverChange/LandCoverChangeProject_data_Run_Feb2024"
+project_dir <- "/bioing/data/LandCoverChange/Run_Feb2024"
+rda_dir     <- "/bioing/data/LandCoverChange/TestRuns_PSA_Script_RDAtest"
+data_dir    <- "/bioing/data/LandCoverChange/LandCoverChangeProject_data_Run_Feb2024"
 
 
 ### LogFile Update
@@ -287,7 +287,6 @@ runOut <- tryCatch({
 }
 
   }
-  NULL
 }, error = function(e) e) %>% suppressWarnings() %>% suppressMessages()
 
 if(any(class(runOut)%in%"error")) {
