@@ -24,9 +24,9 @@ library(vegan)
 #############
 
 ### Project folder
-project_dir <- "/bioing/data/LandCoverChange/Run_Feb2024"
-rda_dir     <- "/bioing/data/LandCoverChange/TestRuns_PSA_Script_RDAtest"
-data_dir    <- "/bioing/data/LandCoverChange/LandCoverChangeProject_data_Run_Feb2024"
+project_dir <- "/Volumes/projects/bioing/data/LandCoverChange/Run_Feb2024"
+rda_dir     <- "/Volumes/projects/bioing/data/LandCoverChange/TestRuns_PSA_Script_RDAtest"
+data_dir    <- "/Volumes/projects/bioing/data/LandCoverChange/LandCoverChangeProject_data_Run_Feb2024"
 
 
 ### LogFile
@@ -254,7 +254,6 @@ invisible(parallel::mcmapply(1:nrow(logfile), function(run) {
       load(glue::glue("{dir_out}/psaChange/psaPixelFlow.rda"))
       load(glue::glue("{rda_dir}/{name}/summaryResults/initRast.rda"))
 
-
       LcovOut <- lapply(1:ncol(psaPixelFlow$flow), function(x) {
         rast <- initRast[1] %>% setNames(names(psaPixelFlow$flow)[x])
         rast[[1]][psaPixelFlow$crds$pxlID] <- as.numeric(unlist(psaPixelFlow$flow[,x]))
@@ -264,7 +263,7 @@ invisible(parallel::mcmapply(1:nrow(logfile), function(run) {
       changeMap    <- class_defs %>% mutate(lcov = ifelse(is.na(Merge_To_Class), Class_Code, Merge_To_Class)) %>%
         dplyr::select(Class_Code, lcov, Class_Plotlabel, Predicted_In_Past, Color_Code)
 
-      save(changeMap, file = glue::glue("{dir_out}/psaChange/changeMap.rda"))
+      save(LcovOut, file = glue::glue("{dir_out}/psaChange/LcovOut.rda"))
     }
     
     #### Figures
@@ -287,26 +286,26 @@ invisible(parallel::mcmapply(1:nrow(logfile), function(run) {
              plot = maps, width = 6*9, height = 6 + ceiling(dim/4)*6, units = "cm", limitsize = FALSE, bg = "white")
       
       
-      dir.create(glue::glue("{project_dir}/{name}/tmp"))
-      
-      invisible(lapply(1:dim, function(x) {
-        
-        stars_tmp <- LcovOut[,,,x]
-        stars_tmp[[1]][1:length(mergeTab %>% 
-                                  filter(!is.na(Color_Code), !duplicated(lcov)) %>% 
-                                  pull(lcov))] <- mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(lcov)    
-        
-        anim <- ggplot() +
-          geom_stars(data = stars_tmp, mapping = aes(fill = as.factor(LandcoverChange))) +
-          scale_fill_manual(values = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(Color_Code),
-                            breaks = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(lcov),
-                            labels = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(Class_Plotlabel), name = "Landcover") +
-          ggtitle(glue::glue("PSA {ID}: {sapply(strsplit(st_get_dimension_values(LcovOut, 'attributes'), '_'), function(y) y[[2]])[x]}")) +
-          theme_void()
-        
-        ggsave(glue::glue("{project_dir}/{name}/tmp/anim_{sprintf('%03d', x)}.png"), plot = anim,
-               width = 19, height = 12, units = "cm", limitsize = FALSE, bg = "white")
-      }))
+      # dir.create(glue::glue("{project_dir}/{name}/tmp"))
+      # 
+      # invisible(lapply(1:dim, function(x) {
+      #   
+      #   stars_tmp <- LcovOut[,,,x]
+      #   stars_tmp[[1]][1:length(mergeTab %>% 
+      #                             filter(!is.na(Color_Code), !duplicated(lcov)) %>% 
+      #                             pull(lcov))] <- mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(lcov)    
+      #   
+      #   anim <- ggplot() +
+      #     geom_stars(data = stars_tmp, mapping = aes(fill = as.factor(LandcoverChange))) +
+      #     scale_fill_manual(values = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(Color_Code),
+      #                       breaks = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(lcov),
+      #                       labels = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(Class_Plotlabel), name = "Landcover") +
+      #     ggtitle(glue::glue("PSA {ID}: {sapply(strsplit(st_get_dimension_values(LcovOut, 'attributes'), '_'), function(y) y[[2]])[x]}")) +
+      #     theme_void()
+      #   
+      #   ggsave(glue::glue("{project_dir}/{name}/tmp/anim_{sprintf('%03d', x)}.png"), plot = anim,
+      #          width = 19, height = 12, units = "cm", limitsize = FALSE, bg = "white")
+      # }))
       
     }
     
